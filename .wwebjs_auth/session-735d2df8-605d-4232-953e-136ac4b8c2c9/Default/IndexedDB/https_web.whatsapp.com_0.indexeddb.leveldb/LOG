@@ -1,0 +1,18 @@
+2026/01/19-18:06:08.288 2702 Creating DB /home/runner/workspace/.wwebjs_auth/session-735d2df8-605d-4232-953e-136ac4b8c2c9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb since it was missing.
+2026/01/19-18:06:08.300 2702 Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-735d2df8-605d-4232-953e-136ac4b8c2c9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/01/19-18:06:08.992 270b Manual compaction at level-0 from '\x00\x03\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x04\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/19-18:06:08.995 270a Level-0 table #5: started
+2026/01/19-18:06:08.998 270a Level-0 table #5: 11338 bytes OK
+2026/01/19-18:06:09.006 270a Delete type=0 #3
+2026/01/19-18:06:09.007 270a Manual compaction at level-0 from '\x00\x04\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x05\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/19-18:06:09.008 270a Level-0 table #7: started
+2026/01/19-18:06:09.012 270a Level-0 table #7: 1028 bytes OK
+2026/01/19-18:06:09.017 270a Delete type=0 #4
+2026/01/19-18:06:09.017 270a Manual compaction at level-0 from '\x00\x05\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x06\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/19-18:06:09.026 270a Manual compaction at level-1 from '\x00\x05\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x06\x00\x00\x00' @ 0 : 0; will stop at '\x00\x05\x00\x00\x05' @ 771 : 0
+2026/01/19-18:06:09.026 270a Compacting 1@1 + 1@2 files
+2026/01/19-18:06:09.029 270a Generated table #8@1: 228 keys, 4782 bytes
+2026/01/19-18:06:09.029 270a Compacted 1@1 + 1@2 files => 4782 bytes
+2026/01/19-18:06:09.032 270a compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/01/19-18:06:09.033 270a Delete type=2 #7
+2026/01/19-18:06:09.033 270a Manual compaction at level-1 from '\x00\x05\x00\x00\x05' @ 771 : 0 .. '\x00\x06\x00\x00\x00' @ 0 : 0; will stop at (end)
