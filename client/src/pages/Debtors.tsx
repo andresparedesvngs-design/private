@@ -123,7 +123,7 @@ export default function Debtors() {
           debtorsToCreate.push({
             name: cols[nameIdx],
             phone: cols[phoneIdx].replace(/[^0-9+]/g, ''),
-            debt: debtIdx !== -1 ? parseFloat(cols[debtIdx]) || 0 : 0,
+            debt: debtIdx !== -1 ? Math.round(parseFloat(cols[debtIdx]) || 0) : 0,
             status: 'disponible' as const
           });
         }

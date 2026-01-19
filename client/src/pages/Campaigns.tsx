@@ -69,7 +69,7 @@ export default function Campaigns() {
       await createCampaign.mutateAsync({
         name: campaignName,
         poolId: selectedPoolId,
-        messageTemplate: messageTemplate,
+        message: messageTemplate,
         status: 'draft',
         totalDebtors: availableDebtors.length,
         sent: 0,
