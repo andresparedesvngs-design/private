@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panel de Gestión de Campañas WhatsApp</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <link rel="stylesheet" href="css/missing-components.css">
+    <link rel="stylesheet" href="css/unified-components.css">
+    <!-- NUEVO: CSS para seguimiento de mensajes -->
+    <link rel="stylesheet" href="css/message-status.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <div class="header-content">
+                <div>
+                    <h1>WhatsApp Massive Sender</h1>
+                    <p class="header-subtitle">Sistema Multi-Pool Avanzado</p>
+                </div>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" onclick="app.toggleTheme()">🌙 Tema</button>
+                    <button class="btn btn-primary" onclick="app.showSettings()">⚙️ Configuración</button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navegación por pestañas -->
+        <nav class="main-nav">
+            <div class="nav-container">
+                <button class="nav-btn active" data-section="debtors">Deudores</button>
+                <button class="nav-btn" data-section="whatsapp"> WhatsApp</button>
+                <button class="nav-btn" data-section="campaigns"> Campañas</button>
+                <button class="nav-btn" data-section="chat">Chat</button>
+            </div>
+        </nav>
+
+        <div class="main-content">
+            <!-- Sección de Deudores (visible por defecto) -->
+            <section id="debtorsSection" class="content-section active">
+                <div class="section-loading">
+                    <div class="spinner"></div>
+                    <p>Cargando gestión de deudores...</p>
+                </div>
+            </section>
+            
+            <!-- Sección de WhatsApp (oculta inicialmente) -->
+            <section id="whatsappSection" class="content-section">
+                <div class="section-loading">
+                    <div class="spinner"></div>
+                    <p>Cargando sesiones de WhatsApp...</p>
+                </div>
+            </section>
+            
+            <!-- Sección de Campañas (oculta inicialmente) -->
+            <section id="campaignsSection" class="content-section">
+                <div class="section-loading">
+                    <div class="spinner"></div>
+                    <p>Cargando campañas...</p>
+                </div>
+            </section>
+            
+            <!-- Sección de Chat (oculta inicialmente) -->
+            <section id="chatSection" class="content-section">
+                <div class="section-loading">
+                    <div class="spinner"></div>
+                    <p>Cargando chat...</p>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <!-- Contenedor para el panel de campaña flotante -->
+    <div id="campaign-container"></div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    
+    <!-- Configuración -->
+    <script src="js/config.js"></script>
+    
+    <!-- Utilidades -->
+    <script src="js/utils/helpers.js"></script>
+    <script src="js/utils/debounce.js"></script>
+    <script src="js/utils/dom.js"></script>
+    
+    <!-- Componentes -->
+    <script src="js/components/modal.js"></script>
+    <script src="js/components/notifications.js"></script>
+    <script src="js/components/virtual-scroll.js"></script>
+    
+    <!-- NUEVO: Sistema de seguimiento de mensajes -->
+    <script src="js/components/messageTracking.js"></script>
+    
+    <!-- Módulos -->
+    <script src="js/modules/ui-manager.js"></script>
+    <script src="js/modules/chat-manager.js"></script>
+    <script src="js/modules/debtors-manager.js"></script>
+    <script src="js/modules/campaigns-manager.js"></script>
+    <script src="js/modules/whatsapp-manager.js"></script>
+    
+    <!-- App principal -->
+    <script src="js/app.js"></script>
+
+    <!-- Script de navegación -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const navButtons = document.querySelectorAll('.nav-btn');
+            const sections = document.querySelectorAll('.content-section');
+            
+            // Función para cambiar de sección
+            function switchSection(sectionName) {
+                // Remover activo de todos
+                navButtons.forEach(btn => btn.classList.remove('active'));
+                sections.forEach(section => section.classList.remove('active'));
+                
+                // Activar el seleccionado
+                const activeBtn = document.querySelector(`.nav-btn[data-section="${sectionName}"]`);
+                const activeSection = document.getElementById(`${sectionName}Section`);
+                
+                if (activeBtn) activeBtn.classList.add('active');
+                if (activeSection) activeSection.classList.add('active');
+                
+                // Notificar a la app del cambio
+                if (window.app && typeof window.app.showSection === 'function') {
+                    window.app.showSection(sectionName);
+                } else {
+                    console.warn('⚠️ app.showSection no disponible aún, reintentando en 1 segundo...');
+                    setTimeout(() => {
+                        if (window.app && typeof window.app.showSection === 'function') {
+                            window.app.showSection(sectionName);
+                        }
+                    }, 1000);
+                }
+            }
+            
+            navButtons.forEach(button => {
+                button.addEventListener('click', function() {
+                    const targetSection = this.getAttribute('data-section');
+                    switchSection(targetSection);
+                });
+            });
+            
+            // Asegurar que la sección de deudores esté activa al inicio
+            setTimeout(() => {
+                const debtorsBtn = document.querySelector('.nav-btn[data-section="debtors"]');
+                if (debtorsBtn && !debtorsBtn.classList.contains('active')) {
+                    switchSection('debtors');
+                }
+            }, 1500);
+        });
+    </script>
+
+    <!-- Script de funciones globales para seguimiento de mensajes -->
+    <script>
+        // Función para validar y iniciar campaña
+        window.validateAndStartCampaign = async function() {
+            if (!window.app || !window.app.modules.debtors) {
+                alert('❌ La aplicación no está inicializada');
+                return;
+            }
+            
+            const debtors = window.app.modules.debtors.getCurrentDebtors();
+            
+            if (debtors.length === 0) {
+                alert('❌ No hay deudores para validar');
+                return;
+            }
+            
+            try {
+                const response = await fetch(window.APP_CONFIG.API_BASE_URL + '/api/campaign/validate-debtors', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        debtors: debtors.map(d => ({
+                            nombre: d.nombre,
+                            telefono: d.telefono,
+                            deuda: d.deuda,
+                            capital: d.capital,
+                            vencimiento: d.vencimiento,
+                            rut: d.rut,
+                            nombre_ejecutivo: d.nombre_ejecutivo,
+                            numero_ejecutivo: d.numero_ejecutivo,
+                            titulo: d.titulo,
+                            estado: d.estado
+                        }))
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    if (data.summary.canProceed) {
+                        showValidationResults(data.validation);
+                        
+                        if (confirm(`${data.validation.statistics.invalid} deudores inválidos encontrados. ¿Deseas continuar solo con los ${data.validation.statistics.valid} válidos?`)) {
+                            window.app.modules.campaigns.startCampaign();
+                        }
+                    } else {
+                        alert('❌ No hay deudores válidos para enviar');
+                    }
+                } else {
+                    alert('❌ Error en validación: ' + data.error);
+                }
+            } catch (error) {
+                console.error('Error en validación:', error);
+                alert('❌ Error de conexión durante la validación');
+            }
+        };
+        
+        function showValidationResults(validation) {
+            const modalContent = `
+                <div class="validation-results">
+                    <h3>🔍 Resultados de Validación</h3>
+                    <div class="alert alert-info">
+                        <strong>Resumen:</strong> 
+                        ${validation.statistics.total} revisados | 
+                        ${validation.statistics.valid} válidos | 
+                        ${validation.statistics.invalid} inválidos | 
+                        ${validation.duplicates.length} duplicados
+                    </div>
+                    
+                    ${validation.invalid.length > 0 ? `
+                    <h6>Deudores Inválidos:</h6>
+                    <div class="table-responsive">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Nombre</th>
+                                    <th>Teléfono</th>
+                                    <th>Errores</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${validation.invalid.slice(0, 10).map(debtor => `
+                                    <tr>
+                                        <td>${debtor.index + 1}</td>
+                                        <td>${debtor.debtor.nombre || 'N/A'}</td>
+                                        <td>${debtor.debtor.telefono || 'N/A'}</td>
+                                        <td><small class="text-danger">${debtor.errors.join(', ')}</small></td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                        ${validation.invalid.length > 10 ? 
+                            `<p class="text-muted">... y ${validation.invalid.length - 10} más</p>` : ''}
+                    </div>
+                    ` : ''}
+                    
+                    ${validation.duplicates.length > 0 ? `
+                    <h6>Duplicados Detectados:</h6>
+                    <ul>
+                        ${validation.duplicates.slice(0, 5).map(dup => `
+                            <li>${dup.telefono} (${dup.count} veces)</li>
+                        `).join('')}
+                    </ul>
+                    ` : ''}
+                </div>
+            `;
+            
+            window.modals.create('validationModal', 'Validación de Deudores', modalContent, `
+                <button class="btn btn-primary" onclick="modals.close('validationModal')">Cerrar</button>
+                <button class="btn btn-success" onclick="modals.close('validationModal'); window.app.modules.campaigns.startCampaign()">Continuar</button>
+            `);
+            
+            window.modals.show('validationModal');
+        }
+
+        // Función para exportar reporte de campaña
+        window.exportCampaignReport = function() {
+            fetch('/api/campaign/report/export')
+                .then(response => response.blob())
+                .then(blob => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `campaign-report-${new Date().toISOString().split('T')[0]}.csv`;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                })
+                .catch(error => {
+                    console.error('Error exportando reporte:', error);
+                    alert('Error al exportar el reporte');
+                });
+        };
+
+        // Función para detener campaña
+        window.stopCampaign = function() {
+            if (confirm('¿Estás seguro de que quieres pausar la campaña?')) {
+                fetch('/api/campaign/stop', {
+                    method: 'POST'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Campaña pausada');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error pausando campaña:', error);
+                });
+            }
+        };
+
+        // Función para cancelar campaña
+        window.cancelCampaign = function() {
+            if (confirm('¿Estás seguro de que quieres cancelar la campaña?')) {
+                fetch('/api/campaign/cancel', {
+                    method: 'POST'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Campaña cancelada');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error cancelando campaña:', error);
+                });
+            }
+        };
+    </script>
+
+    <!-- Script de depuración -->
+    <script>
+        // Debug helper
+        window.debugSystem = function() {
+            console.log('=== DEBUG DEL SISTEMA ===');
+            console.log('App config:', window.APP_CONFIG);
+            console.log('App instance:', window.app);
+            console.log('MessageTracker:', window.messageTracker);
+            
+            if (window.app) {
+                console.log('Socket connected:', window.app.socket?.connected);
+                console.log('Modules initialized:', window.app.isInitialized);
+                console.log('Available methods:', Object.keys(window.app).filter(k => typeof window.app[k] === 'function'));
+                
+                // Probar conexión a endpoints
+                fetch(window.APP_CONFIG.API_BASE_URL + '/api/health')
+                    .then(r => r.json())
+                    .then(d => console.log('Health check:', d))
+                    .catch(e => console.log('Health check failed:', e));
+            }
+            
+            if (window.messageTracker) {
+                console.log('MessageTracker stats:', window.messageTracker.campaignStats);
+                console.log('Message states:', window.messageTracker.messageStates.size);
+            }
+        };
+        
+        // Función para probar app.showSection
+        window.testShowSection = function() {
+            if (window.app && typeof window.app.showSection === 'function') {
+                console.log('✅ app.showSection está disponible');
+                return true;
+            } else {
+                console.log('❌ app.showSection NO está disponible');
+                return false;
+            }
+        };
+        
+        // NUEVO: Funciones para MessageTracker
+        window.testMessageTracking = function() {
+            if (window.messageTracker) {
+                console.log('✅ MessageTracker está disponible');
+                console.log('Estadísticas actuales:', window.messageTracker.campaignStats);
+                return true;
+            } else {
+                console.log('❌ MessageTracker NO está disponible');
+                return false;
+            }
+        };
+        
+        window.simulateMessageUpdate = function() {
+            if (window.messageTracker && window.app && window.app.socket) {
+                // Simular un evento de actualización de mensaje
+                const fakeData = {
+                    messageId: 'test-' + Date.now(),
+                    status: 'sent',
+                    phoneNumber: '+56912345678',
+                    timestamp: new Date().toISOString(),
+                    campaignId: 'test-campaign'
+                };
+                
+                window.messageTracker.updateMessageState(fakeData);
+                console.log('✅ Evento simulado enviado:', fakeData);
+            }
+        };
+        
+        // Ejecutar debug si hay errores
+        setTimeout(() => {
+            if (!window.app?.isInitialized) {
+                console.warn('⚠️ App no se inicializó después de 5 segundos');
+                window.debugSystem();
+            }
+        }, 5000);
+    </script>
+</body>
+</html>
