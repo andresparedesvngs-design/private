@@ -2,6 +2,8 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { Server as SocketServer } from "socket.io";
 import { storage } from "./storage";
+import { whatsappManager } from "./whatsappManager";
+import { campaignEngine } from "./campaignEngine";
 import { insertSessionSchema, insertPoolSchema, insertCampaignSchema, insertDebtorSchema } from "@shared/schema";
 import { z } from "zod";
 import multer from "multer";
@@ -21,6 +23,8 @@ export async function registerRoutes(
   });
 
   (app as any).io = io;
+  whatsappManager.setSocketServer(io);
+  campaignEngine.setSocketServer(io);
 
   io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
@@ -29,6 +33,8 @@ export async function registerRoutes(
       console.log('Client disconnected:', socket.id);
     });
   });
+
+  await whatsappManager.restoreSessions();
 
   app.get("/api/dashboard/stats", async (req, res) => {
     try {
@@ -62,8 +68,11 @@ export async function registerRoutes(
 
   app.post("/api/sessions", async (req, res) => {
     try {
-      const validated = insertSessionSchema.parse(req.body);
-      const session = await storage.createSession(validated);
+      const session = await storage.createSession({
+        status: 'initializing'
+      });
+      
+      await whatsappManager.createSession(session.id);
       
       io.emit('session:created', session);
       
@@ -93,6 +102,7 @@ export async function registerRoutes(
 
   app.delete("/api/sessions/:id", async (req, res) => {
     try {
+      await whatsappManager.destroySession(req.params.id);
       await storage.deleteSession(req.params.id);
       
       io.emit('session:deleted', { id: req.params.id });
@@ -209,6 +219,8 @@ export async function registerRoutes(
 
   app.post("/api/campaigns/:id/start", async (req, res) => {
     try {
+      await campaignEngine.startCampaign(req.params.id);
+      
       const campaign = await storage.updateCampaign(req.params.id, {
         status: "active",
         startedAt: new Date()
@@ -228,9 +240,9 @@ export async function registerRoutes(
 
   app.post("/api/campaigns/:id/pause", async (req, res) => {
     try {
-      const campaign = await storage.updateCampaign(req.params.id, {
-        status: "paused"
-      });
+      await campaignEngine.stopCampaign(req.params.id);
+      
+      const campaign = await storage.getCampaign(req.params.id);
       
       if (!campaign) {
         return res.status(404).json({ error: "Campaign not found" });
