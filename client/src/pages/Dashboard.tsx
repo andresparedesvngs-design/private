@@ -11,19 +11,27 @@ import {
   Pause,
   RefreshCw,
   Trash2,
-  Send, // Added Send to imports
+  Send,
   Plus,
   QrCode,
   Signal,
   Battery
 } from "lucide-react";
-import { mockSessions, mockCampaigns, stats, dailyStats } from "@/lib/mockData";
+import { useDashboardStats, useSessions, useCampaigns } from "@/lib/api";
+import { dailyStats } from "@/lib/mockData";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 export default function Dashboard() {
+  const { data: stats } = useDashboardStats();
+  const { data: sessions } = useSessions();
+  const { data: campaigns } = useCampaigns();
+  
+  const activeCampaigns = campaigns?.filter(c => c.status === 'active') || [];
+  const blockedSessions = sessions?.filter(s => s.status === 'disconnected' || s.status === 'auth_failed').length || 0;
+  
   return (
     <Layout>
       <div className="flex flex-col gap-6">
@@ -54,9 +62,9 @@ export default function Dashboard() {
               <MessageSquare className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats.totalMessages.toLocaleString()}</div>
+              <div className="text-2xl font-bold">{stats?.messagesSent.toLocaleString() || 0}</div>
               <p className="text-xs text-muted-foreground mt-1">
-                <span className="text-green-600 font-medium">+{stats.todayVolume}</span> today
+                All-time sent
               </p>
             </CardContent>
           </Card>
@@ -67,9 +75,9 @@ export default function Dashboard() {
               <Smartphone className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats.activeSessions} <span className="text-sm font-normal text-muted-foreground">/ {mockSessions.length}</span></div>
+              <div className="text-2xl font-bold">{stats?.activeSessions || 0} <span className="text-sm font-normal text-muted-foreground">/ {stats?.totalSessions || 0}</span></div>
               <p className="text-xs text-muted-foreground mt-1">
-                All systems healthy
+                {stats?.activeSessions === stats?.totalSessions ? 'All systems healthy' : 'Some sessions offline'}
               </p>
             </CardContent>
           </Card>
@@ -80,9 +88,13 @@ export default function Dashboard() {
               <Activity className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats.successRate}%</div>
+              <div className="text-2xl font-bold">
+                {stats?.totalSessions && stats?.totalSessions > 0 
+                  ? Math.round((stats.activeSessions / stats.totalSessions) * 100) 
+                  : 0}%
+              </div>
               <p className="text-xs text-muted-foreground mt-1">
-                Last 24 hours
+                Session uptime
               </p>
             </CardContent>
           </Card>
@@ -93,9 +105,9 @@ export default function Dashboard() {
               <AlertTriangle className="h-4 w-4 text-red-500" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold text-red-600">{stats.blockedSessions}</div>
+              <div className="text-2xl font-bold text-red-600">{blockedSessions}</div>
               <p className="text-xs text-muted-foreground mt-1">
-                Action required
+                {blockedSessions > 0 ? 'Action required' : 'All operational'}
               </p>
             </CardContent>
           </Card>
@@ -168,12 +180,12 @@ export default function Dashboard() {
               <CardDescription>Real-time progress.</CardDescription>
             </CardHeader>
             <CardContent className="flex-1 flex flex-col gap-6">
-              {mockCampaigns.map((campaign) => (
+              {campaigns?.slice(0, 3).map((campaign) => (
                 <div key={campaign.id} className="space-y-2">
                   <div className="flex items-center justify-between">
                     <div className="flex flex-col">
                       <span className="font-medium text-sm">{campaign.name}</span>
-                      <span className="text-xs text-muted-foreground capitalize">{campaign.status} • {campaign.sent}/{campaign.total}</span>
+                      <span className="text-xs text-muted-foreground capitalize">{campaign.status} • {campaign.sent}/{campaign.totalDebtors}</span>
                     </div>
                     <Badge variant={campaign.status === 'active' ? 'default' : 'secondary'} className={campaign.status === 'active' ? 'bg-primary/20 text-primary border-primary/20' : ''}>
                       {campaign.status}
@@ -183,10 +195,10 @@ export default function Dashboard() {
                 </div>
               ))}
               
-              {mockCampaigns.length === 0 && (
+              {!campaigns || campaigns.length === 0 && (
                 <div className="flex flex-col items-center justify-center h-full text-muted-foreground py-8">
                   <Send className="h-8 w-8 mb-2 opacity-20" />
-                  <p className="text-sm">No active campaigns</p>
+                  <p className="text-sm">No campaigns yet</p>
                 </div>
               )}
             </CardContent>
@@ -207,7 +219,7 @@ export default function Dashboard() {
           <CardContent>
             <ScrollArea className="h-[200px]">
               <div className="space-y-4">
-                {mockSessions.map((session) => (
+                {sessions?.map((session) => (
                   <div key={session.id} className="flex items-center justify-between p-3 rounded-lg border bg-card/50 hover:bg-secondary/50 transition-colors">
                     <div className="flex items-center gap-4">
                       <div className={`
@@ -218,7 +230,7 @@ export default function Dashboard() {
                         <Smartphone className="h-5 w-5" />
                       </div>
                       <div>
-                        <p className="font-medium text-sm">{session.phoneNumber}</p>
+                        <p className="font-medium text-sm">{session.phoneNumber || 'Pending...'}</p>
                         <p className="text-xs text-muted-foreground flex items-center gap-1">
                           ID: {session.id.slice(0, 8)}
                           {session.battery && <span>• {session.battery}% Battery</span>}
@@ -229,7 +241,9 @@ export default function Dashboard() {
                     <div className="flex items-center gap-4">
                       <div className="text-right hidden sm:block">
                         <p className="text-sm font-medium">{session.messagesSent.toLocaleString()} sent</p>
-                        <p className="text-xs text-muted-foreground">Last active: {new Date(session.lastActive).toLocaleTimeString()}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {session.lastActive ? `Last active: ${new Date(session.lastActive).toLocaleTimeString()}` : 'Never'}
+                        </p>
                       </div>
                       <Badge variant={session.status === 'connected' ? 'outline' : 'destructive'} 
                              className={session.status === 'connected' ? 'bg-green-500/10 text-green-600 border-green-500/20' : ''}>
@@ -241,6 +255,13 @@ export default function Dashboard() {
                     </div>
                   </div>
                 ))}
+                
+                {!sessions || sessions.length === 0 && (
+                  <div className="flex flex-col items-center justify-center h-full text-muted-foreground py-8">
+                    <Smartphone className="h-8 w-8 mb-2 opacity-20" />
+                    <p className="text-sm">No sessions yet</p>
+                  </div>
+                )}
               </div>
             </ScrollArea>
           </CardContent>
