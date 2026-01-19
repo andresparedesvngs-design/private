@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
-import { useCampaigns, usePools, useSessions, useDebtors, useCreateCampaign, useStartCampaign, usePauseCampaign, useCreatePool, useDeleteCampaign } from "@/lib/api";
+import { useCampaigns, usePools, useSessions, useDebtors, useCreateCampaign, useStartCampaign, usePauseCampaign, useCreatePool, useDeleteCampaign, useDeletePool, useUpdatePool } from "@/lib/api";
 import { 
   Plus, 
   Play, 
@@ -26,7 +26,8 @@ import {
   Filter,
   BarChart,
   Loader2,
-  Trash2
+  Trash2,
+  Pencil
 } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { useState } from "react";
@@ -56,6 +57,11 @@ export default function Campaigns() {
   const pauseCampaign = usePauseCampaign();
   const createPool = useCreatePool();
   const deleteCampaign = useDeleteCampaign();
+  const deletePool = useDeletePool();
+  const updatePool = useUpdatePool();
+
+  const [editingPool, setEditingPool] = useState<any>(null);
+  const [isEditPoolOpen, setIsEditPoolOpen] = useState(false);
 
   const availableDebtors = debtors?.filter(d => d.status === 'disponible') || [];
 
@@ -146,6 +152,53 @@ export default function Campaigns() {
         ? prev.filter(id => id !== sessionId)
         : [...prev, sessionId]
     );
+  };
+
+  const handleDeletePool = async (id: string) => {
+    if (confirm('¿Estás seguro de eliminar este pool?')) {
+      try {
+        await deletePool.mutateAsync(id);
+      } catch (error) {
+        console.error('Failed to delete pool:', error);
+      }
+    }
+  };
+
+  const handleEditPool = (pool: any) => {
+    setEditingPool(pool);
+    setPoolName(pool.name);
+    setPoolStrategy(pool.strategy);
+    setPoolDelayBase([pool.delayBase]);
+    setPoolDelayVariation([pool.delayVariation]);
+    setSelectedSessionIds(pool.sessionIds || []);
+    setIsEditPoolOpen(true);
+  };
+
+  const handleUpdatePool = async () => {
+    if (!editingPool || !poolName) return;
+    
+    try {
+      await updatePool.mutateAsync({
+        id: editingPool.id,
+        data: {
+          name: poolName,
+          strategy: poolStrategy,
+          sessionIds: selectedSessionIds,
+          delayBase: poolDelayBase[0],
+          delayVariation: poolDelayVariation[0]
+        }
+      });
+      
+      setIsEditPoolOpen(false);
+      setEditingPool(null);
+      setPoolName("");
+      setPoolStrategy("competitive");
+      setPoolDelayBase([5000]);
+      setPoolDelayVariation([1000]);
+      setSelectedSessionIds([]);
+    } catch (error) {
+      console.error('Failed to update pool:', error);
+    }
   };
 
   return (
@@ -505,6 +558,110 @@ export default function Campaigns() {
                     </DialogFooter>
                   </DialogContent>
                 </Dialog>
+
+                <Dialog open={isEditPoolOpen} onOpenChange={(open) => {
+                  setIsEditPoolOpen(open);
+                  if (!open) {
+                    setEditingPool(null);
+                    setPoolName("");
+                    setPoolStrategy("competitive");
+                    setPoolDelayBase([5000]);
+                    setPoolDelayVariation([1000]);
+                    setSelectedSessionIds([]);
+                  }
+                }}>
+                  <DialogContent className="sm:max-w-[500px]">
+                    <DialogHeader>
+                      <DialogTitle>Editar Pool</DialogTitle>
+                      <DialogDescription>
+                        Modifica la configuración del pool de enrutamiento.
+                      </DialogDescription>
+                    </DialogHeader>
+                    
+                    <div className="space-y-4 py-4">
+                      <div className="space-y-2">
+                        <Label>Pool Name</Label>
+                        <Input 
+                          placeholder="e.g. High Priority Pool"
+                          value={poolName}
+                          onChange={(e) => setPoolName(e.target.value)}
+                          data-testid="input-edit-pool-name"
+                        />
+                      </div>
+                      
+                      <div className="space-y-2">
+                        <Label>Distribution Strategy</Label>
+                        <Select value={poolStrategy} onValueChange={(v: any) => setPoolStrategy(v)}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="competitive">Competitive (fastest wins)</SelectItem>
+                            <SelectItem value="fixed_turns">Fixed Turns (round-robin)</SelectItem>
+                            <SelectItem value="random_turns">Random Turns</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-sm">
+                          <Label>Base Delay</Label>
+                          <span className="text-muted-foreground">{poolDelayBase[0]}ms</span>
+                        </div>
+                        <Slider 
+                          value={poolDelayBase} 
+                          onValueChange={setPoolDelayBase}
+                          max={30000} 
+                          step={500} 
+                        />
+                      </div>
+                      
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-sm">
+                          <Label>Variation</Label>
+                          <span className="text-muted-foreground">±{poolDelayVariation[0]}ms</span>
+                        </div>
+                        <Slider 
+                          value={poolDelayVariation} 
+                          onValueChange={setPoolDelayVariation}
+                          max={10000} 
+                          step={100} 
+                        />
+                      </div>
+                      
+                      <div className="space-y-2">
+                        <Label>Assign Sessions</Label>
+                        <div className="flex flex-wrap gap-2 p-3 bg-muted rounded-lg">
+                          {sessions?.filter(s => s.status === 'connected').map(session => (
+                            <Badge 
+                              key={session.id}
+                              variant={selectedSessionIds.includes(session.id) ? "default" : "outline"}
+                              className="cursor-pointer"
+                              onClick={() => toggleSessionInPool(session.id)}
+                            >
+                              {session.phoneNumber || session.id.slice(0, 8)}
+                            </Badge>
+                          ))}
+                          {!sessions?.filter(s => s.status === 'connected').length && (
+                            <p className="text-xs text-muted-foreground">No hay sesiones conectadas</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <DialogFooter>
+                      <Button variant="ghost" onClick={() => setIsEditPoolOpen(false)}>Cancelar</Button>
+                      <Button 
+                        onClick={handleUpdatePool}
+                        disabled={updatePool.isPending || !poolName}
+                        data-testid="button-update-pool"
+                      >
+                        {updatePool.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+                        Guardar Cambios
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
              </div>
              
              {poolsLoading ? (
@@ -528,7 +685,24 @@ export default function Campaigns() {
                           <span className="text-xs">{pool.sessionIds?.length || 0} sessions assigned</span>
                         </CardDescription>
                       </div>
-                      <Switch checked={pool.active} />
+                      <div className="flex items-center gap-2">
+                        <Button 
+                          variant="ghost" 
+                          size="icon"
+                          onClick={() => handleEditPool(pool)}
+                          data-testid={`button-edit-pool-${pool.id}`}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button 
+                          variant="ghost" 
+                          size="icon"
+                          onClick={() => handleDeletePool(pool.id)}
+                          data-testid={`button-delete-pool-${pool.id}`}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
                     </div>
                   </CardHeader>
                   <CardContent className="space-y-4">

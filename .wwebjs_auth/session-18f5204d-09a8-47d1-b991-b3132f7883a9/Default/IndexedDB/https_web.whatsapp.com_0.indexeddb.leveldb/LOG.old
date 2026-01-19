@@ -1,11 +1,15 @@
-2026/01/19-19:29:33.499 578e Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-18f5204d-09a8-47d1-b991-b3132f7883a9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/01/19-19:29:33.502 578e Recovering log #106
-2026/01/19-19:29:33.530 578e Reusing old log /home/runner/workspace/.wwebjs_auth/session-18f5204d-09a8-47d1-b991-b3132f7883a9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000106.log 
-2026/01/19-19:29:35.243 578e Level-0 table #111: started
-2026/01/19-19:29:35.266 578e Level-0 table #111: 432262 bytes OK
-2026/01/19-19:29:35.271 578e Delete type=0 #106
-2026/01/19-19:29:35.272 5791 Manual compaction at level-0 from '\x00,\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00-\x00\x00\x00' @ 0 : 0; will stop at (end)
-2026/01/19-19:29:35.384 5796 Compacting 1@1 + 1@2 files
-2026/01/19-19:29:35.491 5796 Generated table #112@1: 44002 keys, 1821510 bytes
-2026/01/19-19:29:35.491 5796 Compacted 1@1 + 1@2 files => 1821510 bytes
-2026/01/19-19:29:35.496 5796 compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/01/19-19:30:36.380 59f9 Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-18f5204d-09a8-47d1-b991-b3132f7883a9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/01/19-19:30:36.380 59f9 Recovering log #110
+2026/01/19-19:30:36.387 59f9 Reusing old log /home/runner/workspace/.wwebjs_auth/session-18f5204d-09a8-47d1-b991-b3132f7883a9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000110.log 
+2026/01/19-19:30:36.387 59f9 Delete type=2 #108
+2026/01/19-19:30:36.387 59f9 Delete type=2 #111
+2026/01/19-19:30:38.320 5a03 Level-0 table #115: started
+2026/01/19-19:30:38.337 5a03 Level-0 table #115: 165466 bytes OK
+2026/01/19-19:30:38.341 5a03 Delete type=0 #110
+2026/01/19-19:30:38.342 59f9 Manual compaction at level-0 from '\x00-\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00.\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/19-19:30:38.461 59fa Compacting 1@1 + 1@2 files
+2026/01/19-19:30:38.537 59fa Generated table #116@1: 44758 keys, 1854835 bytes
+2026/01/19-19:30:38.538 59fa Compacted 1@1 + 1@2 files => 1854835 bytes
+2026/01/19-19:30:38.541 59fa compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/01/19-19:30:38.541 59fa Delete type=2 #112
+2026/01/19-19:30:38.541 59fa Delete type=2 #115
