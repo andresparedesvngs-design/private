@@ -1,3 +1,6 @@
 2026/01/19-22:26:07.492 7fda Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-45e02b2a-3d68-4fcf-b5a8-d0aa38bb3701/Default/Local Storage/leveldb/MANIFEST-000001
 2026/01/19-22:26:07.492 7fda Recovering log #3
 2026/01/19-22:26:07.493 7fda Reusing old log /home/runner/workspace/.wwebjs_auth/session-45e02b2a-3d68-4fcf-b5a8-d0aa38bb3701/Default/Local Storage/leveldb/000003.log 
+2026/01/19-22:27:07.993 7fdb Level-0 table #5: started
+2026/01/19-22:27:08.005 7fdb Level-0 table #5: 18532 bytes OK
+2026/01/19-22:27:08.009 7fdb Delete type=0 #3
