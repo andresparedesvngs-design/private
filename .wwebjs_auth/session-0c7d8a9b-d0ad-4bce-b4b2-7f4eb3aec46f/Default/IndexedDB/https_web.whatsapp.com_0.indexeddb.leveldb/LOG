@@ -1,13 +1,13 @@
-2026/01/19-18:59:36.268 4444 Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-0c7d8a9b-d0ad-4bce-b4b2-7f4eb3aec46f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/01/19-18:59:36.268 4444 Recovering log #87
-2026/01/19-18:59:36.323 4444 Reusing old log /home/runner/workspace/.wwebjs_auth/session-0c7d8a9b-d0ad-4bce-b4b2-7f4eb3aec46f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000087.log 
-2026/01/19-18:59:40.238 4444 Level-0 table #92: started
-2026/01/19-18:59:40.254 4444 Level-0 table #92: 129766 bytes OK
-2026/01/19-18:59:40.259 4444 Delete type=0 #87
-2026/01/19-18:59:40.263 444a Manual compaction at level-0 from '\x00(\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00)\x00\x00\x00' @ 0 : 0; will stop at (end)
-2026/01/19-18:59:40.445 4445 Compacting 1@1 + 1@2 files
-2026/01/19-18:59:40.612 4445 Generated table #93@1: 19986 keys, 672780 bytes
-2026/01/19-18:59:40.612 4445 Compacted 1@1 + 1@2 files => 672780 bytes
-2026/01/19-18:59:40.616 4445 compacted to: files[ 0 0 1 0 0 0 0 ]
-2026/01/19-18:59:40.617 4445 Delete type=2 #89
-2026/01/19-18:59:40.617 4445 Delete type=2 #92
+2026/01/19-19:08:33.951 4b4c Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-0c7d8a9b-d0ad-4bce-b4b2-7f4eb3aec46f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/01/19-19:08:33.952 4b4c Recovering log #91
+2026/01/19-19:08:33.967 4b4c Reusing old log /home/runner/workspace/.wwebjs_auth/session-0c7d8a9b-d0ad-4bce-b4b2-7f4eb3aec46f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000091.log 
+2026/01/19-19:08:36.875 4b46 Level-0 table #96: started
+2026/01/19-19:08:36.889 4b46 Level-0 table #96: 178019 bytes OK
+2026/01/19-19:08:36.897 4b46 Delete type=0 #91
+2026/01/19-19:08:36.902 4b46 Manual compaction at level-0 from '\x00)\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00*\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/19-19:08:37.148 4b44 Compacting 1@1 + 1@2 files
+2026/01/19-19:08:37.289 4b44 Generated table #97@1: 21801 keys, 741286 bytes
+2026/01/19-19:08:37.289 4b44 Compacted 1@1 + 1@2 files => 741286 bytes
+2026/01/19-19:08:37.392 4b44 compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/01/19-19:08:37.392 4b44 Delete type=2 #93
+2026/01/19-19:08:37.393 4b44 Delete type=2 #96
