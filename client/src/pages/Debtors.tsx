@@ -21,13 +21,14 @@ import {
   Loader2,
   Users,
   Trash2,
-  Plus
+  Plus,
+  RotateCcw
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { useDebtors, useDeleteDebtor, useCreateDebtor, useBulkCreateDebtors } from "@/lib/api";
+import { useDebtors, useDeleteDebtor, useCreateDebtor, useBulkCreateDebtors, useResetDebtors } from "@/lib/api";
 import type { Debtor } from "@shared/schema";
 import { useState, useRef } from "react";
 
@@ -36,6 +37,7 @@ export default function Debtors() {
   const deleteDebtor = useDeleteDebtor();
   const createDebtor = useCreateDebtor();
   const bulkCreateDebtors = useBulkCreateDebtors();
+  const resetDebtors = useResetDebtors();
   
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -149,6 +151,24 @@ export default function Debtors() {
     }
   };
 
+  const handleResetDebtors = async () => {
+    const unavailable = debtors?.filter(d => d.status === 'fallado' || d.status === 'completado').length || 0;
+    if (unavailable === 0) {
+      alert('Todos los deudores ya están disponibles');
+      return;
+    }
+    
+    if (confirm(`¿Resetear ${unavailable} deudores a estado "disponible"?`)) {
+      try {
+        const result = await resetDebtors.mutateAsync();
+        alert(`Se resetearon ${result.count} deudores exitosamente`);
+      } catch (error) {
+        console.error('Failed to reset debtors:', error);
+        alert('Error al resetear deudores');
+      }
+    }
+  };
+
   const handleExportCSV = () => {
     if (!debtors?.length) {
       alert('No hay deudores para exportar');
@@ -189,6 +209,20 @@ export default function Debtors() {
             <p className="text-muted-foreground mt-1">Upload and manage your contact lists.</p>
           </div>
           <div className="flex gap-2">
+            <Button 
+              variant="outline" 
+              className="gap-2" 
+              onClick={handleResetDebtors}
+              disabled={resetDebtors.isPending}
+              data-testid="button-reset-debtors"
+            >
+              {resetDebtors.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RotateCcw className="h-4 w-4" />
+              )}
+              Reset Status
+            </Button>
             <Button variant="outline" className="gap-2" onClick={handleExportCSV} data-testid="button-export-csv">
               <Download className="h-4 w-4" />
               Export CSV

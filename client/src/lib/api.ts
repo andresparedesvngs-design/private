@@ -307,6 +307,36 @@ export function useDeleteDebtor() {
   });
 }
 
+export function useResetDebtors() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: () => fetchApi<{ success: boolean; count: number }>('/debtors/reset', {
+      method: 'POST',
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['debtors'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
+export function useSendMessage() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: ({ sessionId, phone, message }: { sessionId: string; phone: string; message: string }) =>
+      fetchApi<{ success: boolean; message: string }>(`/sessions/${sessionId}/send`, {
+        method: 'POST',
+        body: JSON.stringify({ phone, message }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      queryClient.invalidateQueries({ queryKey: ['messages'] });
+    },
+  });
+}
+
 export function useMessages(campaignId?: string) {
   return useQuery({
     queryKey: ['messages', campaignId],

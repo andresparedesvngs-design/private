@@ -57,6 +57,8 @@ export interface IStorage {
 
   getSystemLogs(limit?: number): Promise<SystemLog[]>;
   createSystemLog(log: InsertSystemLog): Promise<SystemLog>;
+  
+  resetDebtorsStatus(): Promise<number>;
 
   getDashboardStats(): Promise<{
     totalSessions: number;
@@ -223,6 +225,14 @@ export class DbStorage implements IStorage {
   async createSystemLog(log: InsertSystemLog): Promise<SystemLog> {
     const result = await db.insert(schema.systemLogs).values(log).returning();
     return result[0];
+  }
+
+  async resetDebtorsStatus(): Promise<number> {
+    const result = await db.update(schema.debtors)
+      .set({ status: 'disponible' })
+      .where(sql`${schema.debtors.status} IN ('fallado', 'completado')`)
+      .returning();
+    return result.length;
   }
 
   async getDashboardStats() {

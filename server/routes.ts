@@ -354,5 +354,72 @@ export async function registerRoutes(
     }
   });
 
+  // Send manual message from a session
+  app.post("/api/sessions/:id/send", async (req, res) => {
+    try {
+      const { phone, message } = req.body;
+      
+      if (!phone || !message) {
+        return res.status(400).json({ error: "Phone and message are required" });
+      }
+
+      const session = await storage.getSession(req.params.id);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      if (session.status !== 'connected') {
+        return res.status(400).json({ error: "Session is not connected" });
+      }
+
+      const success = await whatsappManager.sendMessage(req.params.id, phone, message);
+      
+      if (success) {
+        await storage.updateSession(req.params.id, {
+          messagesSent: (session.messagesSent || 0) + 1,
+          lastActive: new Date()
+        });
+
+        await storage.createMessage({
+          sessionId: req.params.id,
+          content: message,
+          status: 'sent',
+          sentAt: new Date()
+        });
+
+        await storage.createSystemLog({
+          level: 'info',
+          source: 'manual',
+          message: `Manual message sent to ${phone}`,
+          metadata: { sessionId: req.params.id, phone }
+        });
+
+        res.json({ success: true, message: "Message sent successfully" });
+      } else {
+        res.status(500).json({ error: "Failed to send message" });
+      }
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Reset all debtors to disponible status
+  app.post("/api/debtors/reset", async (req, res) => {
+    try {
+      const count = await storage.resetDebtorsStatus();
+      
+      await storage.createSystemLog({
+        level: 'info',
+        source: 'system',
+        message: `Reset ${count} debtors to disponible status`,
+        metadata: { count }
+      });
+
+      res.json({ success: true, count });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   return httpServer;
 }

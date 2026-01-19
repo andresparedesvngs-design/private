@@ -4,15 +4,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Search, Send, MoreVertical, Phone, Paperclip, MessageSquare, Loader2 } from "lucide-react";
 import { useState } from "react";
-import { useMessages, useDebtors } from "@/lib/api";
+import { useMessages, useDebtors, useSessions, useSendMessage } from "@/lib/api";
 
 export default function Messages() {
   const { data: messages, isLoading: messagesLoading } = useMessages();
   const { data: debtors } = useDebtors();
+  const { data: sessions } = useSessions();
+  const sendMessage = useSendMessage();
   const [selectedDebtorId, setSelectedDebtorId] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [inputText, setInputText] = useState("");
+
+  const connectedSessions = sessions?.filter(s => s.status === 'connected') || [];
 
   const debtorsWithMessages = debtors?.filter(d => 
     messages?.some(m => m.debtorId === d.id)
@@ -21,9 +27,24 @@ export default function Messages() {
   const selectedDebtor = debtors?.find(d => d.id === selectedDebtorId);
   const selectedMessages = messages?.filter(m => m.debtorId === selectedDebtorId) || [];
 
-  const handleSend = () => {
-    if (!inputText.trim()) return;
-    setInputText("");
+  const handleSend = async () => {
+    if (!inputText.trim() || !selectedDebtor || !selectedSessionId) {
+      if (!selectedSessionId && inputText.trim()) {
+        alert('Selecciona una sesión de WhatsApp para enviar');
+      }
+      return;
+    }
+    
+    try {
+      await sendMessage.mutateAsync({
+        sessionId: selectedSessionId,
+        phone: selectedDebtor.phone,
+        message: inputText.trim()
+      });
+      setInputText("");
+    } catch (error: any) {
+      alert('Error al enviar: ' + error.message);
+    }
   };
 
   return (
@@ -134,18 +155,37 @@ export default function Messages() {
 
               {/* Input Area */}
               <div className="p-4 bg-card border-t flex gap-2 items-center">
-                 <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground">
-                   <Paperclip className="h-5 w-5" />
-                 </Button>
+                 <Select value={selectedSessionId || ""} onValueChange={setSelectedSessionId}>
+                   <SelectTrigger className="w-40 shrink-0">
+                     <SelectValue placeholder="Sesión" />
+                   </SelectTrigger>
+                   <SelectContent>
+                     {connectedSessions.map((session) => (
+                       <SelectItem key={session.id} value={session.id}>
+                         {session.phoneNumber?.slice(-8) || 'Sin número'}
+                       </SelectItem>
+                     ))}
+                   </SelectContent>
+                 </Select>
                  <Input 
                    placeholder="Type a message..." 
                    value={inputText}
                    onChange={(e) => setInputText(e.target.value)}
                    onKeyDown={(e) => e.key === 'Enter' && handleSend()}
                    className="flex-1 bg-secondary/50 border-0 focus-visible:ring-1"
+                   disabled={sendMessage.isPending}
                  />
-                 <Button onClick={handleSend} size="icon" className="shrink-0 rounded-full">
-                   <Send className="h-4 w-4" />
+                 <Button 
+                   onClick={handleSend} 
+                   size="icon" 
+                   className="shrink-0 rounded-full"
+                   disabled={sendMessage.isPending || !selectedSessionId}
+                 >
+                   {sendMessage.isPending ? (
+                     <Loader2 className="h-4 w-4 animate-spin" />
+                   ) : (
+                     <Send className="h-4 w-4" />
+                   )}
                  </Button>
               </div>
             </>

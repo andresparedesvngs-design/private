@@ -1,2 +1,3 @@
-2026/01/19-19:43:06.782 60b2 Creating DB /home/runner/workspace/.wwebjs_auth/session-a5699c74-d16b-40bf-b305-0d5c3b06f7a8/Default/Session Storage since it was missing.
-2026/01/19-19:43:06.800 60b2 Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-a5699c74-d16b-40bf-b305-0d5c3b06f7a8/Default/Session Storage/MANIFEST-000001
+2026/01/19-21:51:59.039 6dcd Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-a5699c74-d16b-40bf-b305-0d5c3b06f7a8/Default/Session Storage/MANIFEST-000001
+2026/01/19-21:51:59.040 6dcd Recovering log #3
+2026/01/19-21:51:59.040 6dcd Reusing old log /home/runner/workspace/.wwebjs_auth/session-a5699c74-d16b-40bf-b305-0d5c3b06f7a8/Default/Session Storage/000003.log 

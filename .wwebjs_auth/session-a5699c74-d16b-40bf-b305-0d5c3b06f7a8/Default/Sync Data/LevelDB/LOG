@@ -1,2 +1,3 @@
-2026/01/19-19:43:06.658 60bb Creating DB /home/runner/workspace/.wwebjs_auth/session-a5699c74-d16b-40bf-b305-0d5c3b06f7a8/Default/Sync Data/LevelDB since it was missing.
-2026/01/19-19:43:06.674 60bb Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-a5699c74-d16b-40bf-b305-0d5c3b06f7a8/Default/Sync Data/LevelDB/MANIFEST-000001
+2026/01/19-21:51:58.333 6dce Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-a5699c74-d16b-40bf-b305-0d5c3b06f7a8/Default/Sync Data/LevelDB/MANIFEST-000001
+2026/01/19-21:51:58.333 6dce Recovering log #3
+2026/01/19-21:51:58.333 6dce Reusing old log /home/runner/workspace/.wwebjs_auth/session-a5699c74-d16b-40bf-b305-0d5c3b06f7a8/Default/Sync Data/LevelDB/000003.log 
