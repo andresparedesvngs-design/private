@@ -110,6 +110,7 @@ export class DbStorage implements IStorage {
   }
 
   async deleteSession(id: string): Promise<void> {
+    await db.update(schema.messages).set({ sessionId: null }).where(eq(schema.messages.sessionId, id));
     await db.delete(schema.sessions).where(eq(schema.sessions.id, id));
   }
 
@@ -156,6 +157,8 @@ export class DbStorage implements IStorage {
   }
 
   async deleteCampaign(id: string): Promise<void> {
+    await db.delete(schema.messages).where(eq(schema.messages.campaignId, id));
+    await db.update(schema.debtors).set({ campaignId: null }).where(eq(schema.debtors.campaignId, id));
     await db.delete(schema.campaigns).where(eq(schema.campaigns.id, id));
   }
 

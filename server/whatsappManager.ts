@@ -173,13 +173,18 @@ class WhatsAppManager {
   async destroySession(sessionId: string): Promise<void> {
     const whatsappClient = this.clients.get(sessionId);
     
-    if (!whatsappClient) {
-      throw new Error('Session not found');
-    }
-
     try {
-      await whatsappClient.client.destroy();
-      this.clients.delete(sessionId);
+      if (whatsappClient) {
+        await whatsappClient.client.destroy();
+        this.clients.delete(sessionId);
+      }
+      
+      const fs = await import('fs');
+      const path = await import('path');
+      const sessionDir = path.join(process.cwd(), '.wwebjs_auth', `session-${sessionId}`);
+      if (fs.existsSync(sessionDir)) {
+        fs.rmSync(sessionDir, { recursive: true, force: true });
+      }
       
       await storage.createSystemLog({
         level: 'info',
@@ -191,7 +196,6 @@ class WhatsAppManager {
       console.log('Session destroyed:', sessionId);
     } catch (error) {
       console.error('Error destroying session:', error);
-      throw error;
     }
   }
 

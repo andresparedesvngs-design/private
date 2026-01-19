@@ -1,13 +1,15 @@
-2026/01/19-19:16:35.285 52b4 Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-18f5204d-09a8-47d1-b991-b3132f7883a9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/01/19-19:16:35.285 52b4 Recovering log #102
-2026/01/19-19:16:35.289 52b4 Reusing old log /home/runner/workspace/.wwebjs_auth/session-18f5204d-09a8-47d1-b991-b3132f7883a9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000102.log 
-2026/01/19-19:16:37.120 52b8 Level-0 table #107: started
-2026/01/19-19:16:37.127 52b8 Level-0 table #107: 165155 bytes OK
-2026/01/19-19:16:37.133 52b8 Delete type=0 #102
-2026/01/19-19:16:37.133 52b5 Manual compaction at level-0 from '\x00+\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00,\x00\x00\x00' @ 0 : 0; will stop at (end)
-2026/01/19-19:16:37.265 52b4 Compacting 1@1 + 1@2 files
-2026/01/19-19:16:37.341 52b4 Generated table #108@1: 42210 keys, 1745451 bytes
-2026/01/19-19:16:37.341 52b4 Compacted 1@1 + 1@2 files => 1745451 bytes
-2026/01/19-19:16:37.347 52b4 compacted to: files[ 0 0 1 0 0 0 0 ]
-2026/01/19-19:16:37.348 52b4 Delete type=2 #104
-2026/01/19-19:16:37.348 52b4 Delete type=2 #107
+2026/01/19-19:30:36.380 59f9 Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-18f5204d-09a8-47d1-b991-b3132f7883a9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/01/19-19:30:36.380 59f9 Recovering log #110
+2026/01/19-19:30:36.387 59f9 Reusing old log /home/runner/workspace/.wwebjs_auth/session-18f5204d-09a8-47d1-b991-b3132f7883a9/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000110.log 
+2026/01/19-19:30:36.387 59f9 Delete type=2 #108
+2026/01/19-19:30:36.387 59f9 Delete type=2 #111
+2026/01/19-19:30:38.320 5a03 Level-0 table #115: started
+2026/01/19-19:30:38.337 5a03 Level-0 table #115: 165466 bytes OK
+2026/01/19-19:30:38.341 5a03 Delete type=0 #110
+2026/01/19-19:30:38.342 59f9 Manual compaction at level-0 from '\x00-\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00.\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/19-19:30:38.461 59fa Compacting 1@1 + 1@2 files
+2026/01/19-19:30:38.537 59fa Generated table #116@1: 44758 keys, 1854835 bytes
+2026/01/19-19:30:38.538 59fa Compacted 1@1 + 1@2 files => 1854835 bytes
+2026/01/19-19:30:38.541 59fa compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/01/19-19:30:38.541 59fa Delete type=2 #112
+2026/01/19-19:30:38.541 59fa Delete type=2 #115
