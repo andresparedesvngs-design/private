@@ -1,13 +1,11 @@
-2026/01/19-19:56:04.735 6912 Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-45e02b2a-3d68-4fcf-b5a8-d0aa38bb3701/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/01/19-19:56:04.736 6912 Recovering log #78
-2026/01/19-19:56:04.745 6912 Reusing old log /home/runner/workspace/.wwebjs_auth/session-45e02b2a-3d68-4fcf-b5a8-d0aa38bb3701/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000078.log 
-2026/01/19-19:56:06.553 690d Level-0 table #83: started
-2026/01/19-19:56:06.557 690d Level-0 table #83: 98292 bytes OK
-2026/01/19-19:56:06.561 690d Delete type=0 #78
-2026/01/19-19:56:06.562 690d Manual compaction at level-0 from '\x00%\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00&\x00\x00\x00' @ 0 : 0; will stop at (end)
-2026/01/19-19:56:06.630 690e Compacting 1@1 + 1@2 files
-2026/01/19-19:56:06.693 690e Generated table #84@1: 31896 keys, 1225925 bytes
-2026/01/19-19:56:06.693 690e Compacted 1@1 + 1@2 files => 1225925 bytes
-2026/01/19-19:56:06.699 690e compacted to: files[ 0 0 1 0 0 0 0 ]
-2026/01/19-19:56:06.699 690e Delete type=2 #80
-2026/01/19-19:56:06.699 690e Delete type=2 #83
+2026/01/19-21:51:55.118 6dad Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-45e02b2a-3d68-4fcf-b5a8-d0aa38bb3701/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/01/19-21:51:55.119 6dad Recovering log #82
+2026/01/19-21:51:55.269 6dad Reusing old log /home/runner/workspace/.wwebjs_auth/session-45e02b2a-3d68-4fcf-b5a8-d0aa38bb3701/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000082.log 
+2026/01/19-21:51:57.271 6d86 Level-0 table #87: started
+2026/01/19-21:51:57.496 6d86 Level-0 table #87: 255188 bytes OK
+2026/01/19-21:51:57.500 6d86 Delete type=0 #82
+2026/01/19-21:51:57.501 6d86 Manual compaction at level-0 from '\x00&\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00'\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/19-21:51:58.093 6d87 Compacting 1@1 + 1@2 files
+2026/01/19-21:51:58.154 6d87 Generated table #88@1: 34100 keys, 1300383 bytes
+2026/01/19-21:51:58.164 6d87 Compacted 1@1 + 1@2 files => 1300383 bytes
+2026/01/19-21:51:58.173 6d87 compacted to: files[ 0 0 1 0 0 0 0 ]

@@ -1,13 +1,13 @@
-2026/01/19-21:52:11.287 6e87 Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-0c7d8a9b-d0ad-4bce-b4b2-7f4eb3aec46f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/01/19-21:52:11.287 6e87 Recovering log #119
-2026/01/19-21:52:11.303 6e87 Reusing old log /home/runner/workspace/.wwebjs_auth/session-0c7d8a9b-d0ad-4bce-b4b2-7f4eb3aec46f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000119.log 
-2026/01/19-21:52:13.734 6e80 Level-0 table #124: started
-2026/01/19-21:52:13.753 6e80 Level-0 table #124: 181525 bytes OK
-2026/01/19-21:52:13.768 6e80 Delete type=0 #119
-2026/01/19-21:52:13.768 6e7b Manual compaction at level-0 from '\x000\x00\x00\x00' @ 72057594037927935 : 1 .. '\x001\x00\x00\x00' @ 0 : 0; will stop at (end)
-2026/01/19-21:52:13.851 6e7c Compacting 1@1 + 1@2 files
-2026/01/19-21:52:13.938 6e7c Generated table #125@1: 32083 keys, 1109231 bytes
-2026/01/19-21:52:13.938 6e7c Compacted 1@1 + 1@2 files => 1109231 bytes
-2026/01/19-21:52:13.944 6e7c compacted to: files[ 0 0 1 0 0 0 0 ]
-2026/01/19-21:52:13.944 6e7c Delete type=2 #121
-2026/01/19-21:52:13.944 6e7c Delete type=2 #124
+2026/01/19-22:03:47.612 74a2 Reusing MANIFEST /home/runner/workspace/.wwebjs_auth/session-0c7d8a9b-d0ad-4bce-b4b2-7f4eb3aec46f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/01/19-22:03:47.614 74a2 Recovering log #123
+2026/01/19-22:03:47.647 74a2 Reusing old log /home/runner/workspace/.wwebjs_auth/session-0c7d8a9b-d0ad-4bce-b4b2-7f4eb3aec46f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000123.log 
+2026/01/19-22:03:49.636 749a Level-0 table #128: started
+2026/01/19-22:03:49.649 749a Level-0 table #128: 186335 bytes OK
+2026/01/19-22:03:49.655 749a Delete type=0 #123
+2026/01/19-22:03:49.657 7497 Manual compaction at level-0 from '\x001\x00\x00\x00' @ 72057594037927935 : 1 .. '\x002\x00\x00\x00' @ 0 : 0; will stop at (end)
+2026/01/19-22:03:49.800 7498 Compacting 1@1 + 1@2 files
+2026/01/19-22:03:49.862 7498 Generated table #129@1: 32827 keys, 1125017 bytes
+2026/01/19-22:03:49.862 7498 Compacted 1@1 + 1@2 files => 1125017 bytes
+2026/01/19-22:03:49.868 7498 compacted to: files[ 0 0 1 0 0 0 0 ]
+2026/01/19-22:03:49.868 7498 Delete type=2 #125
+2026/01/19-22:03:49.868 7498 Delete type=2 #128

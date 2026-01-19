@@ -2,18 +2,12 @@ import Layout from "@/components/layout/Layout";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { AlertTriangle, Info, Loader2 } from "lucide-react";
-import { useEffect, useRef } from "react";
 import { useSystemLogs } from "@/lib/api";
 
 type LogLevel = 'info' | 'error' | 'warning';
 
 export default function SystemLogs() {
   const { data: logs, isLoading } = useSystemLogs(100);
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
 
   const getIcon = (level: LogLevel) => {
     switch (level) {
@@ -77,7 +71,6 @@ export default function SystemLogs() {
                     </span>
                   </div>
                 ))}
-                <div ref={bottomRef} />
               </div>
             )}
           </ScrollArea>
