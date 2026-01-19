@@ -65,8 +65,15 @@ class CampaignEngine {
   }
 
   private async processCampaign(campaignId: string, campaign: Campaign, pool: Pool): Promise<void> {
-    const debtors = await storage.getDebtors(campaignId);
-    const availableDebtors = debtors.filter(d => d.status === 'disponible');
+    const allDebtors = await storage.getDebtors();
+    const availableDebtors = allDebtors.filter(d => d.status === 'disponible');
+
+    await storage.createSystemLog({
+      level: 'info',
+      source: 'campaign',
+      message: `Found ${availableDebtors.length} available debtors to process`,
+      metadata: { campaignId, totalDebtors: allDebtors.length, availableDebtors: availableDebtors.length }
+    });
 
     if (availableDebtors.length === 0) {
       await storage.updateCampaign(campaignId, {
@@ -74,9 +81,20 @@ class CampaignEngine {
         completedAt: new Date()
       });
       
+      await storage.createSystemLog({
+        level: 'warn',
+        source: 'campaign',
+        message: `Campaign completed with no available debtors`,
+        metadata: { campaignId }
+      });
+      
       this.activeCampaigns.delete(campaignId);
       return;
     }
+
+    await storage.updateCampaign(campaignId, {
+      totalDebtors: availableDebtors.length
+    });
 
     let sessionIndex = 0;
 
@@ -196,7 +214,10 @@ class CampaignEngine {
     try {
       const personalizedMessage = campaign.message
         .replace('{nombre}', debtor.name)
-        .replace('{deuda}', debtor.debt.toString());
+        .replace('{name}', debtor.name)
+        .replace('{deuda}', debtor.debt.toString())
+        .replace('{debt}', debtor.debt.toString())
+        .replace('{phone}', debtor.phone);
 
       await whatsappManager.sendMessage(sessionId, debtor.phone, personalizedMessage);
       
