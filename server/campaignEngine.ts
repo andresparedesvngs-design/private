@@ -97,6 +97,8 @@ class CampaignEngine {
     });
 
     let sessionIndex = 0;
+    let sentCount = 0;
+    let failedCount = 0;
 
     for (const debtor of availableDebtors) {
       if (!this.activeCampaigns.get(campaignId)) {
@@ -114,6 +116,8 @@ class CampaignEngine {
         const success = await this.sendMessage(sessionId, debtor, campaign);
 
         if (success) {
+          sentCount++;
+          
           await storage.updateDebtor(debtor.id, {
             status: 'completado',
             lastContact: new Date()
@@ -128,15 +132,19 @@ class CampaignEngine {
             sentAt: new Date()
           });
 
+          const progress = Math.round(((sentCount + failedCount) / availableDebtors.length) * 100);
           const updatedCampaign = await storage.updateCampaign(campaignId, {
-            sent: campaign.sent + 1,
-            progress: Math.round(((campaign.sent + 1) / campaign.totalDebtors) * 100)
+            sent: sentCount,
+            failed: failedCount,
+            progress
           });
 
           if (this.io && updatedCampaign) {
             this.io.emit('campaign:progress', updatedCampaign);
           }
         } else {
+          failedCount++;
+          
           await storage.updateDebtor(debtor.id, {
             status: 'fallado'
           });
@@ -150,8 +158,11 @@ class CampaignEngine {
             error: 'Failed to send message'
           });
 
+          const progress = Math.round(((sentCount + failedCount) / availableDebtors.length) * 100);
           const updatedCampaign = await storage.updateCampaign(campaignId, {
-            failed: campaign.failed + 1
+            sent: sentCount,
+            failed: failedCount,
+            progress
           });
 
           if (this.io && updatedCampaign) {
@@ -159,7 +170,8 @@ class CampaignEngine {
           }
         }
       } catch (error: any) {
-        console.error('Error sending message:', error);
+        failedCount++;
+        console.error('Error sending message:', error.message);
         
         await storage.updateDebtor(debtor.id, {
           status: 'fallado'
@@ -172,6 +184,13 @@ class CampaignEngine {
           content: campaign.message,
           status: 'failed',
           error: error.message
+        });
+
+        const progress = Math.round(((sentCount + failedCount) / availableDebtors.length) * 100);
+        await storage.updateCampaign(campaignId, {
+          sent: sentCount,
+          failed: failedCount,
+          progress
         });
       }
 
@@ -195,9 +214,9 @@ class CampaignEngine {
   }
 
   private getNextSession(pool: Pool, index: number): string {
-    if (pool.strategy === 'turnos_fijos') {
+    if (pool.strategy === 'fixed_turns' || pool.strategy === 'turnos_fijos') {
       return pool.sessionIds[index % pool.sessionIds.length];
-    } else if (pool.strategy === 'turnos_aleatorios') {
+    } else if (pool.strategy === 'random_turns' || pool.strategy === 'turnos_aleatorios') {
       const randomIndex = Math.floor(Math.random() * pool.sessionIds.length);
       return pool.sessionIds[randomIndex];
     } else {

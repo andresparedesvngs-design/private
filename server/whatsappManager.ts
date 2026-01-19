@@ -207,20 +207,34 @@ class WhatsAppManager {
     }
 
     try {
-      const formattedNumber = phoneNumber.includes('@c.us') 
-        ? phoneNumber 
-        : `${phoneNumber}@c.us`;
+      let cleanNumber = phoneNumber.replace(/[\s\-\(\)\+]/g, '');
+      
+      if (!cleanNumber.match(/^\d+$/)) {
+        throw new Error(`Invalid phone number format: ${phoneNumber}`);
+      }
+      
+      const formattedNumber = cleanNumber.includes('@c.us') 
+        ? cleanNumber 
+        : `${cleanNumber}@c.us`;
+      
+      const isRegistered = await whatsappClient.client.isRegisteredUser(formattedNumber);
+      if (!isRegistered) {
+        throw new Error(`Number ${phoneNumber} is not registered on WhatsApp`);
+      }
       
       await whatsappClient.client.sendMessage(formattedNumber, message);
       
-      await storage.updateSession(sessionId, {
-        messagesSent: (await storage.getSession(sessionId))!.messagesSent + 1,
-        lastActive: new Date()
-      });
+      const session = await storage.getSession(sessionId);
+      if (session) {
+        await storage.updateSession(sessionId, {
+          messagesSent: session.messagesSent + 1,
+          lastActive: new Date()
+        });
+      }
 
       return true;
-    } catch (error) {
-      console.error('Error sending message:', error);
+    } catch (error: any) {
+      console.error('Error sending message:', error.message);
       throw error;
     }
   }
