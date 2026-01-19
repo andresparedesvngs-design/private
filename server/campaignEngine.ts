@@ -105,12 +105,43 @@ class CampaignEngine {
         break;
       }
 
+      const connectedSessions = this.getConnectedSessions(pool);
+      
+      if (connectedSessions.length === 0) {
+        await storage.createSystemLog({
+          level: 'error',
+          source: 'campaign',
+          message: `No connected sessions available. Pausing campaign.`,
+          metadata: { campaignId }
+        });
+        
+        await storage.updateCampaign(campaignId, {
+          status: 'paused'
+        });
+        
+        this.activeCampaigns.delete(campaignId);
+        
+        if (this.io) {
+          this.io.emit('campaign:error', {
+            campaignId,
+            error: 'No hay sesiones conectadas disponibles'
+          });
+        }
+        return;
+      }
+
       await storage.updateDebtor(debtor.id, {
         status: 'procesando'
       });
 
-      const sessionId = this.getNextSession(pool, sessionIndex);
+      const sessionId = this.getNextSession(pool, sessionIndex, connectedSessions);
       sessionIndex++;
+      
+      if (!sessionId) {
+        failedCount++;
+        await storage.updateDebtor(debtor.id, { status: 'fallado' });
+        continue;
+      }
 
       try {
         const success = await this.sendMessage(sessionId, debtor, campaign);
@@ -213,14 +244,23 @@ class CampaignEngine {
     });
   }
 
-  private getNextSession(pool: Pool, index: number): string {
+  private getConnectedSessions(pool: Pool): string[] {
+    const connectedInMemory = whatsappManager.getConnectedSessionIds();
+    return pool.sessionIds.filter(id => connectedInMemory.includes(id));
+  }
+
+  private getNextSession(pool: Pool, index: number, connectedSessions: string[]): string | null {
+    if (connectedSessions.length === 0) {
+      return null;
+    }
+
     if (pool.strategy === 'fixed_turns' || pool.strategy === 'turnos_fijos') {
-      return pool.sessionIds[index % pool.sessionIds.length];
+      return connectedSessions[index % connectedSessions.length];
     } else if (pool.strategy === 'random_turns' || pool.strategy === 'turnos_aleatorios') {
-      const randomIndex = Math.floor(Math.random() * pool.sessionIds.length);
-      return pool.sessionIds[randomIndex];
+      const randomIndex = Math.floor(Math.random() * connectedSessions.length);
+      return connectedSessions[randomIndex];
     } else {
-      return pool.sessionIds[index % pool.sessionIds.length];
+      return connectedSessions[index % connectedSessions.length];
     }
   }
 

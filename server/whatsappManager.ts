@@ -251,6 +251,21 @@ class WhatsAppManager {
     return Array.from(this.clients.values());
   }
 
+  getConnectedSessionIds(): string[] {
+    const connected: string[] = [];
+    for (const [id, client] of this.clients.entries()) {
+      if (client.status === 'connected') {
+        connected.push(id);
+      }
+    }
+    return connected;
+  }
+
+  isSessionConnected(sessionId: string): boolean {
+    const client = this.clients.get(sessionId);
+    return client?.status === 'connected' || false;
+  }
+
   async restoreSessions(): Promise<void> {
     console.log('Restoring sessions from database...');
     
