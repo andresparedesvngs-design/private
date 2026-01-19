@@ -17,7 +17,7 @@ import {
   Signal,
   Battery
 } from "lucide-react";
-import { mockSessions, mockCampaigns, stats, chartData } from "@/lib/mockData";
+import { mockSessions, mockCampaigns, stats, dailyStats } from "@/lib/mockData";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -111,7 +111,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent className="h-[300px]">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData}>
+                <AreaChart data={dailyStats}>
                   <defs>
                     <linearGradient id="colorSent" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3}/>
@@ -213,7 +213,7 @@ export default function Dashboard() {
                       <div className={`
                         h-10 w-10 rounded-full flex items-center justify-center
                         ${session.status === 'connected' ? 'bg-green-100 text-green-700' : 
-                          session.status === 'error' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}
+                          (session.status === 'auth_failed' || session.status === 'disconnected') ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}
                       `}>
                         <Smartphone className="h-5 w-5" />
                       </div>

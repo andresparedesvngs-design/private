@@ -92,12 +92,20 @@ export const mockDebtors: Debtor[] = [
   { id: '5', name: 'Pedro López', phone: '+56 9 7788 9900', debtAmount: 0, dueDate: subDays(new Date(), 10).toISOString(), status: 'blocked', tags: ['blocked'], executive: 'Ana García', rut: '10.123.456-7', processStatus: 'fallado' },
 ];
 
+export const stats = {
+  totalMessages: 12450,
+  activeSessions: 3,
+  blockedSessions: 1,
+  successRate: 98.2,
+  todayVolume: 1240,
+};
+
 export const dailyStats = [
-  { time: '09:00', messages: 120 },
-  { time: '10:00', messages: 350 },
-  { time: '11:00', messages: 420 },
-  { time: '12:00', messages: 280 },
-  { time: '13:00', messages: 150 },
-  { time: '14:00', messages: 300 },
-  { time: '15:00', messages: 450 },
+  { time: '09:00', sent: 120, failed: 2 },
+  { time: '10:00', sent: 350, failed: 5 },
+  { time: '11:00', sent: 420, failed: 8 },
+  { time: '12:00', sent: 280, failed: 1 },
+  { time: '13:00', sent: 150, failed: 0 },
+  { time: '14:00', sent: 300, failed: 3 },
+  { time: '15:00', sent: 450, failed: 1 },
 ];
