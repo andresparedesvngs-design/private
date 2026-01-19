@@ -18,23 +18,26 @@ import {
   MoreHorizontal,
   FileSpreadsheet,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  MessageSquare,
+  Play
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-
-// Mock data for debtors based on debtors.js
-const mockDebtors = [
-  { id: 1, name: "Juan Pérez", phone: "56949351842", debt: 150000, status: "pendiente", lastContact: "2026-01-10" },
-  { id: 2, name: "Maria Gonzalez", phone: "56991247408", debt: 45000, status: "contactado", lastContact: "2026-01-15" },
-  { id: 3, name: "Carlos Ruiz", phone: "56927615358", debt: 890000, status: "vencido", lastContact: "2025-12-20" },
-  { id: 4, name: "Ana Silva", phone: "56927455353", debt: 12500, status: "pagado", lastContact: "2026-01-14" },
-  { id: 5, name: "Pedro Soto", phone: "56927621892", debt: 320000, status: "pendiente", lastContact: "2026-01-12" },
-  { id: 6, name: "Laura Diaz", phone: "56987654321", debt: 55000, status: "judicial", lastContact: "2025-11-30" },
-  { id: 7, name: "Diego Torres", phone: "56912345678", debt: 210000, status: "pendiente", lastContact: "2026-01-16" },
-];
+import { mockDebtors, Debtor } from "@/lib/mockData";
 
 export default function Debtors() {
+  
+  const getStatusBadge = (status: Debtor['processStatus']) => {
+      switch(status) {
+          case 'disponible': return <Badge variant="outline" className="text-green-600 border-green-200 bg-green-50">🟢 Disponible</Badge>;
+          case 'procesando': return <Badge variant="outline" className="text-yellow-600 border-yellow-200 bg-yellow-50 animate-pulse">🟡 Procesando</Badge>;
+          case 'completado': return <Badge variant="outline" className="text-blue-600 border-blue-200 bg-blue-50">✅ Completado</Badge>;
+          case 'fallado': return <Badge variant="outline" className="text-red-600 border-red-200 bg-red-50">❌ Fallado</Badge>;
+          default: return <Badge variant="outline">Unknown</Badge>;
+      }
+  };
+
   return (
     <Layout>
       <div className="flex flex-col gap-6">
@@ -91,47 +94,50 @@ export default function Debtors() {
             <Table>
               <TableHeader>
                 <TableRow className="bg-muted/50 hover:bg-muted/50">
-                  <TableHead>Name</TableHead>
-                  <TableHead>Phone</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Phone / RUT</TableHead>
                   <TableHead className="text-right">Debt Amount</TableHead>
-                  <TableHead className="text-right">Last Contact</TableHead>
-                  <TableHead className="w-[50px]"></TableHead>
+                  <TableHead className="text-right">Last Interaction</TableHead>
+                  <TableHead className="w-[120px] text-center">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {mockDebtors.map((debtor) => (
                   <TableRow key={debtor.id}>
-                    <TableCell className="font-medium">{debtor.name}</TableCell>
-                    <TableCell className="font-mono text-xs">{debtor.phone}</TableCell>
                     <TableCell>
-                      <Badge variant="outline" className={`
-                        capitalize
-                        ${debtor.status === 'pagado' ? 'text-green-600 border-green-200 bg-green-50' : ''}
-                        ${debtor.status === 'vencido' ? 'text-red-600 border-red-200 bg-red-50' : ''}
-                        ${debtor.status === 'pendiente' ? 'text-orange-600 border-orange-200 bg-orange-50' : ''}
-                        ${debtor.status === 'contactado' ? 'text-blue-600 border-blue-200 bg-blue-50' : ''}
-                      `}>
-                        {debtor.status}
-                      </Badge>
+                      {getStatusBadge(debtor.processStatus)}
                     </TableCell>
-                    <TableCell className="text-right font-mono">${debtor.debt.toLocaleString()}</TableCell>
-                    <TableCell className="text-right text-muted-foreground">{new Date(debtor.lastContact).toLocaleDateString()}</TableCell>
+                    <TableCell className="font-medium">{debtor.name}</TableCell>
                     <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" className="h-8 w-8 p-0">
-                            <span className="sr-only">Open menu</span>
-                            <MoreHorizontal className="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                          <DropdownMenuItem>View Details</DropdownMenuItem>
-                          <DropdownMenuItem>Send Individual Message</DropdownMenuItem>
-                          <DropdownMenuItem className="text-red-600">Delete</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                        <div className="flex flex-col">
+                            <span className="font-mono text-xs">{debtor.phone}</span>
+                            <span className="text-[10px] text-muted-foreground">{debtor.rut || 'No RUT'}</span>
+                        </div>
+                    </TableCell>
+                    <TableCell className="text-right font-mono">${debtor.debtAmount.toLocaleString()}</TableCell>
+                    <TableCell className="text-right text-muted-foreground text-xs">
+                        {debtor.status.toUpperCase()}
+                    </TableCell>
+                    <TableCell>
+                        <div className="flex justify-center gap-1">
+                             <Button size="icon" variant="ghost" className="h-8 w-8 text-blue-600" title="Test Message">
+                                <MessageSquare className="h-4 w-4" />
+                             </Button>
+                             <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" className="h-8 w-8 p-0">
+                                    <MoreHorizontal className="h-4 w-4" />
+                                </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                                <DropdownMenuItem>View Details</DropdownMenuItem>
+                                <DropdownMenuItem>Edit Info</DropdownMenuItem>
+                                <DropdownMenuItem className="text-red-600">Delete</DropdownMenuItem>
+                                </DropdownMenuContent>
+                            </DropdownMenu>
+                        </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -139,7 +145,7 @@ export default function Debtors() {
             </Table>
           </CardContent>
           <div className="p-4 border-t text-xs text-muted-foreground flex justify-between items-center">
-            <span>Showing 7 of 12,450 records</span>
+            <span>Showing {mockDebtors.length} records</span>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" disabled>Previous</Button>
               <Button variant="outline" size="sm">Next</Button>
