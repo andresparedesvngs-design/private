@@ -272,6 +272,8 @@ export function useCreateDebtorsBulk() {
   });
 }
 
+export const useBulkCreateDebtors = useCreateDebtorsBulk;
+
 export function useUpdateDebtor() {
   const queryClient = useQueryClient();
   
