@@ -15,22 +15,47 @@ import {
   Plus,
   QrCode,
   Signal,
-  Battery
+  Battery,
+  Loader2
 } from "lucide-react";
-import { useDashboardStats, useSessions, useCampaigns } from "@/lib/api";
-import { dailyStats } from "@/lib/mockData";
+import { useDashboardStats, useSessions, useCampaigns, useMessages } from "@/lib/api";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 export default function Dashboard() {
-  const { data: stats } = useDashboardStats();
-  const { data: sessions } = useSessions();
-  const { data: campaigns } = useCampaigns();
+  const { data: stats, isLoading: statsLoading } = useDashboardStats();
+  const { data: sessions, isLoading: sessionsLoading } = useSessions();
+  const { data: campaigns, isLoading: campaignsLoading } = useCampaigns();
+  const { data: messages } = useMessages();
   
   const activeCampaigns = campaigns?.filter(c => c.status === 'active') || [];
   const blockedSessions = sessions?.filter(s => s.status === 'disconnected' || s.status === 'auth_failed').length || 0;
+  
+  const chartData = (() => {
+    if (!messages || messages.length === 0) {
+      return [];
+    }
+    const hourCounts: Record<string, { sent: number; failed: number }> = {};
+    messages.forEach(msg => {
+      if (msg.sentAt) {
+        const hour = new Date(msg.sentAt).getHours();
+        const time = `${hour.toString().padStart(2, '0')}:00`;
+        if (!hourCounts[time]) {
+          hourCounts[time] = { sent: 0, failed: 0 };
+        }
+        if (msg.status === 'failed') {
+          hourCounts[time].failed++;
+        } else {
+          hourCounts[time].sent++;
+        }
+      }
+    });
+    return Object.entries(hourCounts)
+      .map(([time, counts]) => ({ time, ...counts }))
+      .sort((a, b) => a.time.localeCompare(b.time));
+  })();
   
   return (
     <Layout>
@@ -62,7 +87,7 @@ export default function Dashboard() {
               <MessageSquare className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats?.messagesSent.toLocaleString() || 0}</div>
+              <div className="text-2xl font-bold">{(stats?.messagesSent ?? 0).toLocaleString()}</div>
               <p className="text-xs text-muted-foreground mt-1">
                 All-time sent
               </p>
@@ -75,9 +100,9 @@ export default function Dashboard() {
               <Smartphone className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{stats?.activeSessions || 0} <span className="text-sm font-normal text-muted-foreground">/ {stats?.totalSessions || 0}</span></div>
+              <div className="text-2xl font-bold">{stats?.activeSessions ?? 0} <span className="text-sm font-normal text-muted-foreground">/ {stats?.totalSessions ?? 0}</span></div>
               <p className="text-xs text-muted-foreground mt-1">
-                {stats?.activeSessions === stats?.totalSessions ? 'All systems healthy' : 'Some sessions offline'}
+                {!stats ? 'Loading...' : stats.activeSessions === stats.totalSessions ? 'All systems healthy' : 'Some sessions offline'}
               </p>
             </CardContent>
           </Card>
@@ -89,7 +114,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">
-                {stats?.totalSessions && stats?.totalSessions > 0 
+                {stats && stats.totalSessions > 0 
                   ? Math.round((stats.activeSessions / stats.totalSessions) * 100) 
                   : 0}%
               </div>
@@ -122,8 +147,15 @@ export default function Dashboard() {
               <CardDescription>Hourly message throughput for today.</CardDescription>
             </CardHeader>
             <CardContent className="h-[300px]">
+              {chartData.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
+                  <Activity className="h-8 w-8 mb-2 opacity-20" />
+                  <p className="text-sm">No message data available</p>
+                  <p className="text-xs">Chart will populate as messages are sent</p>
+                </div>
+              ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={dailyStats}>
+                <AreaChart data={chartData}>
                   <defs>
                     <linearGradient id="colorSent" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3}/>
@@ -170,6 +202,7 @@ export default function Dashboard() {
                   />
                 </AreaChart>
               </ResponsiveContainer>
+              )}
             </CardContent>
           </Card>
 

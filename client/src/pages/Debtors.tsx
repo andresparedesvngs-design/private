@@ -20,15 +20,19 @@ import {
   CheckCircle2,
   AlertCircle,
   MessageSquare,
-  Play
+  Play,
+  Loader2
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { mockDebtors, Debtor } from "@/lib/mockData";
+import { useDebtors, useDeleteDebtor } from "@/lib/api";
+import type { Debtor } from "@shared/schema";
 
 export default function Debtors() {
+  const { data: debtors, isLoading } = useDebtors();
+  const deleteDebtor = useDeleteDebtor();
   
-  const getStatusBadge = (status: Debtor['processStatus']) => {
+  const getStatusBadge = (status: 'disponible' | 'procesando' | 'completado' | 'fallado') => {
       switch(status) {
           case 'disponible': return <Badge variant="outline" className="text-green-600 border-green-200 bg-green-50">🟢 Disponible</Badge>;
           case 'procesando': return <Badge variant="outline" className="text-yellow-600 border-yellow-200 bg-yellow-50 animate-pulse">🟡 Procesando</Badge>;
@@ -91,61 +95,75 @@ export default function Debtors() {
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-muted/50 hover:bg-muted/50">
-                  <TableHead>Status</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Phone / RUT</TableHead>
-                  <TableHead className="text-right">Debt Amount</TableHead>
-                  <TableHead className="text-right">Last Interaction</TableHead>
-                  <TableHead className="w-[120px] text-center">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {mockDebtors.map((debtor) => (
-                  <TableRow key={debtor.id}>
-                    <TableCell>
-                      {getStatusBadge(debtor.processStatus)}
-                    </TableCell>
-                    <TableCell className="font-medium">{debtor.name}</TableCell>
-                    <TableCell>
-                        <div className="flex flex-col">
-                            <span className="font-mono text-xs">{debtor.phone}</span>
-                            <span className="text-[10px] text-muted-foreground">{debtor.rut || 'No RUT'}</span>
-                        </div>
-                    </TableCell>
-                    <TableCell className="text-right font-mono">${debtor.debtAmount.toLocaleString()}</TableCell>
-                    <TableCell className="text-right text-muted-foreground text-xs">
-                        {debtor.status.toUpperCase()}
-                    </TableCell>
-                    <TableCell>
-                        <div className="flex justify-center gap-1">
-                             <Button size="icon" variant="ghost" className="h-8 w-8 text-blue-600" title="Test Message">
-                                <MessageSquare className="h-4 w-4" />
-                             </Button>
-                             <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" className="h-8 w-8 p-0">
-                                    <MoreHorizontal className="h-4 w-4" />
-                                </Button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent align="end">
-                                <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                                <DropdownMenuItem>View Details</DropdownMenuItem>
-                                <DropdownMenuItem>Edit Info</DropdownMenuItem>
-                                <DropdownMenuItem className="text-red-600">Delete</DropdownMenuItem>
-                                </DropdownMenuContent>
-                            </DropdownMenu>
-                        </div>
-                    </TableCell>
+            {isLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            ) : !debtors?.length ? (
+              <div className="flex flex-col items-center justify-center py-12 text-center">
+                <FileSpreadsheet className="h-12 w-12 text-muted-foreground/50 mb-4" />
+                <h3 className="font-semibold text-lg">No debtors found</h3>
+                <p className="text-sm text-muted-foreground">Import a list to get started</p>
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/50 hover:bg-muted/50">
+                    <TableHead>Status</TableHead>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Phone</TableHead>
+                    <TableHead className="text-right">Debt Amount</TableHead>
+                    <TableHead className="text-right">Last Contact</TableHead>
+                    <TableHead className="w-[120px] text-center">Actions</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {debtors?.map((debtor) => (
+                    <TableRow key={debtor.id}>
+                      <TableCell>
+                        {getStatusBadge(debtor.status as 'disponible' | 'procesando' | 'completado' | 'fallado')}
+                      </TableCell>
+                      <TableCell className="font-medium">{debtor.name}</TableCell>
+                      <TableCell>
+                          <span className="font-mono text-xs">{debtor.phone}</span>
+                      </TableCell>
+                      <TableCell className="text-right font-mono">${debtor.debt.toLocaleString()}</TableCell>
+                      <TableCell className="text-right text-muted-foreground text-xs">
+                          {debtor.lastContact ? new Date(debtor.lastContact).toLocaleDateString() : 'Never'}
+                      </TableCell>
+                      <TableCell>
+                          <div className="flex justify-center gap-1">
+                               <Button size="icon" variant="ghost" className="h-8 w-8 text-blue-600" title="Test Message">
+                                  <MessageSquare className="h-4 w-4" />
+                               </Button>
+                               <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                  <Button variant="ghost" className="h-8 w-8 p-0">
+                                      <MoreHorizontal className="h-4 w-4" />
+                                  </Button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end">
+                                  <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                                  <DropdownMenuItem>View Details</DropdownMenuItem>
+                                  <DropdownMenuItem>Edit Info</DropdownMenuItem>
+                                  <DropdownMenuItem 
+                                    className="text-red-600"
+                                    onClick={() => deleteDebtor.mutate(debtor.id)}
+                                  >
+                                    Delete
+                                  </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                              </DropdownMenu>
+                          </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
           </CardContent>
           <div className="p-4 border-t text-xs text-muted-foreground flex justify-between items-center">
-            <span>Showing {mockDebtors.length} records</span>
+            <span>Showing {debtors?.length ?? 0} records</span>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" disabled>Previous</Button>
               <Button variant="outline" size="sm">Next</Button>

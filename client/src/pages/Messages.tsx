@@ -2,32 +2,27 @@ import Layout from "@/components/layout/Layout";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, Send, MoreVertical, Phone, Paperclip, MessageSquare } from "lucide-react";
+import { Search, Send, MoreVertical, Phone, Paperclip, MessageSquare, Loader2 } from "lucide-react";
 import { useState } from "react";
-
-const mockConversations = [
-  { id: 1, name: "Juan Pérez", phone: "56949351842", lastMsg: "Gracias, ya realicé el pago.", time: "10:30 AM", unread: 2 },
-  { id: 2, name: "Maria Gonzalez", phone: "56991247408", lastMsg: "¿Tienen facilidades de pago?", time: "09:15 AM", unread: 0 },
-  { id: 3, name: "Carlos Ruiz", phone: "56927615358", lastMsg: "No me interesa.", time: "Yesterday", unread: 0 },
-];
-
-const mockMessages = [
-  { id: 1, type: "out", text: "Estimado Juan, recordamos su deuda de $150.000.", time: "10:00 AM" },
-  { id: 2, type: "in", text: "Hola, ¿puedo pagar por transferencia?", time: "10:05 AM" },
-  { id: 3, type: "out", text: "Sí, claro. Aquí están los datos...", time: "10:10 AM" },
-  { id: 4, type: "in", text: "Gracias, ya realicé el pago.", time: "10:30 AM" },
-];
+import { useMessages, useDebtors } from "@/lib/api";
 
 export default function Messages() {
-  const [selectedId, setSelectedId] = useState<number | null>(1);
+  const { data: messages, isLoading: messagesLoading } = useMessages();
+  const { data: debtors } = useDebtors();
+  const [selectedDebtorId, setSelectedDebtorId] = useState<string | null>(null);
   const [inputText, setInputText] = useState("");
-  const [messages, setMessages] = useState(mockMessages);
+
+  const debtorsWithMessages = debtors?.filter(d => 
+    messages?.some(m => m.debtorId === d.id)
+  ) || [];
+
+  const selectedDebtor = debtors?.find(d => d.id === selectedDebtorId);
+  const selectedMessages = messages?.filter(m => m.debtorId === selectedDebtorId) || [];
 
   const handleSend = () => {
     if (!inputText.trim()) return;
-    setMessages([...messages, { id: Date.now(), type: "out", text: inputText, time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) }]);
     setInputText("");
   };
 
@@ -44,47 +39,60 @@ export default function Messages() {
              </div>
           </div>
           <ScrollArea className="flex-1">
-             <div className="flex flex-col">
-               {mockConversations.map((conv) => (
-                 <button
-                   key={conv.id}
-                   onClick={() => setSelectedId(conv.id)}
-                   className={`flex items-start gap-3 p-4 text-left transition-colors border-b last:border-0 hover:bg-muted/50 ${selectedId === conv.id ? 'bg-muted' : ''}`}
-                 >
-                   <Avatar>
-                     <AvatarFallback>{conv.name.slice(0,2)}</AvatarFallback>
-                   </Avatar>
-                   <div className="flex-1 overflow-hidden">
-                     <div className="flex justify-between items-baseline">
-                       <span className="font-medium truncate">{conv.name}</span>
-                       <span className="text-xs text-muted-foreground">{conv.time}</span>
-                     </div>
-                     <p className="text-sm text-muted-foreground truncate">{conv.lastMsg}</p>
-                   </div>
-                   {conv.unread > 0 && (
-                     <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
-                       {conv.unread}
-                     </span>
-                   )}
-                 </button>
-               ))}
-             </div>
+            {messagesLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              </div>
+            ) : debtorsWithMessages.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                <MessageSquare className="h-8 w-8 mb-2 opacity-20" />
+                <p className="text-sm">No messages yet</p>
+              </div>
+            ) : (
+              <div className="flex flex-col">
+                {debtorsWithMessages.map((debtor) => {
+                  const lastMsg = messages?.filter(m => m.debtorId === debtor.id).pop();
+                  return (
+                    <button
+                      key={debtor.id}
+                      onClick={() => setSelectedDebtorId(debtor.id)}
+                      className={`flex items-start gap-3 p-4 text-left transition-colors border-b last:border-0 hover:bg-muted/50 ${selectedDebtorId === debtor.id ? 'bg-muted' : ''}`}
+                    >
+                      <Avatar>
+                        <AvatarFallback>{debtor.name.slice(0,2).toUpperCase()}</AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1 overflow-hidden">
+                        <div className="flex justify-between items-baseline">
+                          <span className="font-medium truncate">{debtor.name}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {lastMsg?.sentAt ? new Date(lastMsg.sentAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '-'}
+                          </span>
+                        </div>
+                        <p className="text-sm text-muted-foreground truncate">
+                          {lastMsg?.content?.slice(0, 50) || 'No messages'}...
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </ScrollArea>
         </Card>
 
         {/* Chat Area */}
         <Card className="flex-1 flex flex-col overflow-hidden">
-          {selectedId ? (
+          {selectedDebtor ? (
             <>
               {/* Chat Header */}
               <div className="p-4 border-b flex justify-between items-center bg-card">
                  <div className="flex items-center gap-3">
                     <Avatar>
-                      <AvatarFallback>JP</AvatarFallback>
+                      <AvatarFallback>{selectedDebtor.name.slice(0,2).toUpperCase()}</AvatarFallback>
                     </Avatar>
                     <div>
-                      <h3 className="font-semibold">Juan Pérez</h3>
-                      <p className="text-xs text-muted-foreground">+56 9 4935 1842</p>
+                      <h3 className="font-semibold">{selectedDebtor.name}</h3>
+                      <p className="text-xs text-muted-foreground">{selectedDebtor.phone}</p>
                     </div>
                  </div>
                  <div className="flex gap-2">
@@ -100,24 +108,27 @@ export default function Messages() {
               {/* Chat Messages */}
               <ScrollArea className="flex-1 p-4 bg-muted/20">
                  <div className="space-y-4">
-                   {messages.map((msg) => (
+                   {selectedMessages.map((msg) => (
                      <div 
                        key={msg.id} 
-                       className={`flex ${msg.type === 'out' ? 'justify-end' : 'justify-start'}`}
+                       className="flex justify-end"
                      >
-                       <div className={`
-                         max-w-[70%] rounded-2xl px-4 py-2 text-sm shadow-sm
-                         ${msg.type === 'out' 
-                           ? 'bg-primary text-primary-foreground rounded-tr-none' 
-                           : 'bg-card border rounded-tl-none'}
-                       `}>
-                         <p>{msg.text}</p>
-                         <span className={`text-[10px] block text-right mt-1 opacity-70`}>
-                           {msg.time}
+                       <div className="max-w-[70%] rounded-2xl px-4 py-2 text-sm shadow-sm bg-primary text-primary-foreground rounded-tr-none">
+                         <p>{msg.content}</p>
+                         <span className="text-[10px] block text-right mt-1 opacity-70">
+                           {msg.sentAt ? new Date(msg.sentAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : 'Pending'}
+                           {msg.status === 'failed' && ' • Failed'}
                          </span>
                        </div>
                      </div>
                    ))}
+                   
+                   {selectedMessages.length === 0 && (
+                     <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+                       <MessageSquare className="h-8 w-8 mb-2 opacity-20" />
+                       <p className="text-sm">No messages in this conversation</p>
+                     </div>
+                   )}
                  </div>
               </ScrollArea>
 
@@ -141,7 +152,7 @@ export default function Messages() {
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
               <MessageSquare className="h-12 w-12 mb-4 opacity-20" />
-              <p>Select a conversation to start messaging</p>
+              <p>Select a conversation to view messages</p>
             </div>
           )}
         </Card>

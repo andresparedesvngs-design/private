@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
-import { mockCampaigns, mockPools, mockSessions } from "@/lib/mockData";
+import { useCampaigns, usePools, useSessions, useCreateCampaign, useStartCampaign, usePauseCampaign } from "@/lib/api";
 import { 
   Plus, 
   Play, 
@@ -24,7 +24,8 @@ import {
   RefreshCw,
   Search,
   Filter,
-  BarChart
+  BarChart,
+  Loader2
 } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { useState } from "react";
@@ -33,6 +34,13 @@ export default function Campaigns() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [step, setStep] = useState(1);
   const [activeTab, setActiveTab] = useState("campaigns");
+
+  const { data: campaigns, isLoading: campaignsLoading } = useCampaigns();
+  const { data: pools, isLoading: poolsLoading } = usePools();
+  const { data: sessions } = useSessions();
+  const createCampaign = useCreateCampaign();
+  const startCampaign = useStartCampaign();
+  const pauseCampaign = usePauseCampaign();
 
   return (
     <Layout>
@@ -92,7 +100,7 @@ export default function Campaigns() {
                           <SelectValue placeholder="Select routing pool" />
                         </SelectTrigger>
                         <SelectContent>
-                          {mockPools.map(pool => (
+                          {pools?.map(pool => (
                             <SelectItem key={pool.id} value={pool.id}>{pool.name}</SelectItem>
                           ))}
                         </SelectContent>
@@ -161,7 +169,16 @@ export default function Campaigns() {
               </div>
             </div>
 
-            {mockCampaigns.map((campaign) => (
+            {campaignsLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              </div>
+            ) : !campaigns?.length ? (
+              <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                <Users className="h-12 w-12 mb-4 opacity-50" />
+                <p>No campaigns found</p>
+              </div>
+            ) : campaigns?.map((campaign) => (
               <Card key={campaign.id} className="group overflow-hidden transition-all hover:shadow-md hover:border-primary/50">
                 <div className="absolute top-0 left-0 w-1 h-full bg-primary opacity-0 group-hover:opacity-100 transition-opacity" />
                 <CardContent className="p-6">
@@ -181,15 +198,15 @@ export default function Campaigns() {
                       <div className="flex items-center gap-4 text-sm text-muted-foreground">
                         <span className="flex items-center gap-1">
                           <Clock className="h-3.5 w-3.5" />
-                          Started {new Date(campaign.startTime).toLocaleDateString()}
+                          Started {campaign.startedAt ? new Date(campaign.startedAt).toLocaleDateString() : 'Not started'}
                         </span>
                         <span className="flex items-center gap-1">
                           <Users className="h-3.5 w-3.5" />
-                          {campaign.total.toLocaleString()} recipients
+                          {campaign.totalDebtors.toLocaleString()} recipients
                         </span>
                          <span className="flex items-center gap-1">
                           <Zap className="h-3.5 w-3.5" />
-                          Pool: {mockPools.find(p => p.id === campaign.poolId)?.name || 'Default'}
+                          Pool: {pools?.find(p => p.id === campaign.poolId)?.name || 'Default'}
                         </span>
                       </div>
                     </div>
@@ -236,15 +253,19 @@ export default function Campaigns() {
                 </Button>
              </div>
              
-             {mockPools.map((pool) => (
+             {poolsLoading ? (
+                <div className="md:col-span-2 flex items-center justify-center py-12">
+                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                </div>
+             ) : pools?.map((pool) => (
                 <Card key={pool.id} className="border-l-4 border-l-primary">
                   <CardHeader>
                     <div className="flex justify-between items-start">
                       <div>
                         <CardTitle>{pool.name}</CardTitle>
                         <CardDescription className="mt-1 flex items-center gap-2">
-                          <Badge variant="secondary">{pool.mode}</Badge>
-                          <span className="text-xs">{pool.sessions.length} sessions assigned</span>
+                          <Badge variant="secondary">{pool.strategy}</Badge>
+                          <span className="text-xs">{pool.sessionIds?.length || 0} sessions assigned</span>
                         </CardDescription>
                       </div>
                       <Switch checked={pool.active} />
@@ -262,16 +283,16 @@ export default function Campaigns() {
                      <div className="space-y-2">
                        <div className="flex justify-between text-sm">
                          <Label>Variation (ms)</Label>
-                         <span className="text-muted-foreground">±{pool.delayVariacion}ms</span>
+                         <span className="text-muted-foreground">±{pool.delayVariation}ms</span>
                        </div>
-                       <Slider defaultValue={[pool.delayVariacion]} max={5000} step={100} />
+                       <Slider defaultValue={[pool.delayVariation]} max={5000} step={100} />
                      </div>
 
                      <div className="pt-2">
                        <Label className="text-sm mb-2 block">Assigned Sessions</Label>
                        <div className="flex flex-wrap gap-2">
-                         {pool.sessions.map(sid => {
-                           const session = mockSessions.find(s => s.id === sid);
+                         {pool.sessionIds?.map(sid => {
+                           const session = sessions?.find(s => s.id === sid);
                            return (
                              <Badge key={sid} variant="outline" className="bg-background">
                                {session?.phoneNumber || sid}
