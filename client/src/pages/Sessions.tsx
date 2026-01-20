@@ -3,15 +3,17 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter }
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { useSessions, useCreateSession, useDeleteSession } from "@/lib/api";
-import { Smartphone, Plus, Trash2, RefreshCw, QrCode, Signal, Battery, AlertCircle, Loader2 } from "lucide-react";
+import { useSessions, useCreateSession, useDeleteSession, useReconnectSession } from "@/lib/api";
+import { Smartphone, Plus, Trash2, RefreshCw, QrCode, Signal, Battery, AlertCircle, Loader2, RotateCcw } from "lucide-react";
 import { useState } from "react";
 
 export default function Sessions() {
   const [isQRModalOpen, setIsQRModalOpen] = useState(false);
+  const [reconnectingId, setReconnectingId] = useState<string | null>(null);
   const { data: sessions, isLoading } = useSessions();
   const createSession = useCreateSession();
   const deleteSession = useDeleteSession();
+  const reconnectSession = useReconnectSession();
 
   const handleCreateSession = async () => {
     try {
@@ -29,6 +31,17 @@ export default function Sessions() {
       } catch (error) {
         console.error('Failed to delete session:', error);
       }
+    }
+  };
+
+  const handleReconnect = async (id: string) => {
+    try {
+      setReconnectingId(id);
+      await reconnectSession.mutateAsync(id);
+    } catch (error) {
+      console.error('Failed to reconnect session:', error);
+    } finally {
+      setReconnectingId(null);
     }
   };
 
@@ -166,6 +179,22 @@ export default function Sessions() {
                         <p className="text-xs opacity-80">Please scan QR again.</p>
                       </div>
                     </div>
+                  )}
+
+                  {(session.status === 'disconnected' || session.status === 'auth_failed') && (
+                    <Button 
+                      className="w-full gap-2 mt-2"
+                      variant="outline"
+                      onClick={() => handleReconnect(session.id)}
+                      disabled={reconnectingId === session.id}
+                    >
+                      {reconnectingId === session.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RotateCcw className="h-4 w-4" />
+                      )}
+                      Reconectar
+                    </Button>
                   )}
                 </CardContent>
                 <CardFooter className="pt-3 border-t bg-muted/20 flex justify-between items-center text-xs text-muted-foreground">

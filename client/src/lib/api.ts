@@ -84,6 +84,19 @@ export function useDeleteSession() {
   });
 }
 
+export function useReconnectSession() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: (id: string) => fetchApi<{ message: string }>(`/sessions/${id}/reconnect`, {
+      method: 'POST',
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+    },
+  });
+}
+
 export function usePools() {
   return useQuery({
     queryKey: ['pools'],

@@ -239,6 +239,15 @@ class WhatsAppManager {
       return true;
     } catch (error: any) {
       console.error('Error sending message:', error.message);
+      
+      if (error.message.includes('detached Frame') || 
+          error.message.includes('Target closed') ||
+          error.message.includes('Protocol error')) {
+        whatsappClient.status = 'disconnected';
+        await storage.updateSession(sessionId, { status: 'disconnected' });
+        console.log('Session marked as disconnected due to browser error:', sessionId);
+      }
+      
       throw error;
     }
   }

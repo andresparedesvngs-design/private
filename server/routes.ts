@@ -113,6 +113,30 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/sessions/:id/reconnect", async (req, res) => {
+    try {
+      const session = await storage.getSession(req.params.id);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      await whatsappManager.destroySession(req.params.id);
+      
+      await storage.updateSession(req.params.id, {
+        status: 'initializing',
+        qrCode: null
+      });
+
+      await whatsappManager.createSession(req.params.id);
+      
+      io.emit('session:reconnecting', { id: req.params.id });
+      
+      res.json({ message: 'Reconnection initiated', sessionId: req.params.id });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get("/api/pools", async (req, res) => {
     try {
       const pools = await storage.getPools();
