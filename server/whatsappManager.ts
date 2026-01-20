@@ -253,11 +253,11 @@ class WhatsAppManager {
 
   getConnectedSessionIds(): string[] {
     const connected: string[] = [];
-    for (const [id, client] of this.clients.entries()) {
+    this.clients.forEach((client, id) => {
       if (client.status === 'connected') {
         connected.push(id);
       }
-    }
+    });
     return connected;
   }
 
@@ -274,12 +274,31 @@ class WhatsAppManager {
       s.status === 'connected' || s.status === 'qr_ready'
     );
 
+    console.log(`Found ${connectedSessions.length} sessions to restore`);
+
     for (const session of connectedSessions) {
       try {
         console.log('Restoring session:', session.id);
+        
+        await storage.updateSession(session.id, {
+          status: 'reconnecting'
+        });
+        
         await this.createSession(session.id);
-      } catch (error) {
-        console.error('Error restoring session:', session.id, error);
+        console.log('Session restoration initiated:', session.id);
+      } catch (error: any) {
+        console.error('Error restoring session:', session.id, error.message);
+        
+        await storage.updateSession(session.id, {
+          status: 'disconnected'
+        });
+        
+        await storage.createSystemLog({
+          level: 'error',
+          source: 'whatsapp',
+          message: `Failed to restore session ${session.id}: ${error.message}`,
+          metadata: { sessionId: session.id, error: error.message }
+        });
       }
     }
   }
