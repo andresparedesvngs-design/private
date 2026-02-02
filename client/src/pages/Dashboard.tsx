@@ -23,15 +23,40 @@ import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianG
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
+import { useState } from "react";
 
 export default function Dashboard() {
-  const { data: stats, isLoading: statsLoading } = useDashboardStats();
-  const { data: sessions, isLoading: sessionsLoading } = useSessions();
-  const { data: campaigns, isLoading: campaignsLoading } = useCampaigns();
-  const { data: messages } = useMessages();
+  const queryClient = useQueryClient();
+  const [, setLocation] = useLocation();
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useDashboardStats();
+  const { data: sessions, isLoading: sessionsLoading, refetch: refetchSessions } = useSessions();
+  const { data: campaigns, isLoading: campaignsLoading, refetch: refetchCampaigns } = useCampaigns();
+  const { data: messages, refetch: refetchMessages } = useMessages();
   
   const activeCampaigns = campaigns?.filter(c => c.status === 'active') || [];
   const blockedSessions = sessions?.filter(s => s.status === 'disconnected' || s.status === 'auth_failed').length || 0;
+
+  const sessionStatusLabels: Record<string, string> = {
+    connected: "Conectada",
+    disconnected: "Desconectada",
+    auth_failed: "Autenticación fallida",
+    qr_ready: "QR listo",
+    initializing: "Inicializando",
+    authenticated: "Autenticada",
+    reconnecting: "Reconectando",
+  };
+  const campaignStatusLabels: Record<string, string> = {
+    draft: "Borrador",
+    active: "Activa",
+    paused: "Pausada",
+    completed: "Completada",
+    error: "Con error",
+  };
+  const displaySessionStatus = (status: string) => sessionStatusLabels[status] ?? status;
+  const displayCampaignStatus = (status: string) => campaignStatusLabels[status] ?? status;
   
   const chartData = (() => {
     if (!messages || messages.length === 0) {
@@ -39,23 +64,50 @@ export default function Dashboard() {
     }
     const hourCounts: Record<string, { sent: number; failed: number }> = {};
     messages.forEach(msg => {
-      if (msg.sentAt) {
-        const hour = new Date(msg.sentAt).getHours();
-        const time = `${hour.toString().padStart(2, '0')}:00`;
-        if (!hourCounts[time]) {
-          hourCounts[time] = { sent: 0, failed: 0 };
-        }
-        if (msg.status === 'failed') {
-          hourCounts[time].failed++;
-        } else {
-          hourCounts[time].sent++;
-        }
+      const timestamp = msg.sentAt ?? msg.createdAt ?? msg.updatedAt;
+      if (!timestamp) {
+        return;
+      }
+
+      const hour = new Date(timestamp).getHours();
+      const time = `${hour.toString().padStart(2, '0')}:00`;
+      if (!hourCounts[time]) {
+        hourCounts[time] = { sent: 0, failed: 0 };
+      }
+      if (msg.status === 'failed') {
+        hourCounts[time].failed++;
+      } else {
+        hourCounts[time].sent++;
       }
     });
     return Object.entries(hourCounts)
       .map(([time, counts]) => ({ time, ...counts }))
       .sort((a, b) => a.time.localeCompare(b.time));
   })();
+
+  const handleRefresh = async () => {
+    try {
+      setIsRefreshing(true);
+      await Promise.all([
+        refetchStats(),
+        refetchSessions(),
+        refetchCampaigns(),
+        refetchMessages(),
+      ]);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['dashboard', 'stats'] }),
+        queryClient.invalidateQueries({ queryKey: ['sessions'] }),
+        queryClient.invalidateQueries({ queryKey: ['campaigns'] }),
+        queryClient.invalidateQueries({ queryKey: ['messages'] }),
+      ]);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const handleCreateCampaign = () => {
+    setLocation("/campaigns?new=1");
+  };
   
   return (
     <Layout>
@@ -64,17 +116,29 @@ export default function Dashboard() {
         {/* Header Section */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-heading font-bold text-foreground">Dashboard</h1>
-            <p className="text-muted-foreground mt-1">Real-time overview of your WhatsApp infrastructure.</p>
+            <h1 className="text-3xl font-heading font-bold text-foreground">Panel</h1>
+            <p className="text-muted-foreground mt-1">Resumen en tiempo real de tu infraestructura de WhatsApp.</p>
           </div>
           <div className="flex gap-3">
-            <Button variant="outline" className="gap-2">
-              <RefreshCw className="h-4 w-4" />
-              Refresh Data
+            <Button
+              variant="outline"
+              className="gap-2"
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+            >
+              {isRefreshing ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4" />
+              )}
+              Actualizar datos
             </Button>
-            <Button className="gap-2 bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20">
+            <Button
+              className="gap-2 bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20"
+              onClick={handleCreateCampaign}
+            >
               <Play className="h-4 w-4" />
-              Start New Campaign
+              Iniciar nueva campaña
             </Button>
           </div>
         </div>
@@ -83,33 +147,33 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <Card className="border-l-4 border-l-primary shadow-sm hover:shadow-md transition-shadow">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Total Messages</CardTitle>
+              <CardTitle className="text-sm font-medium">Mensajes totales</CardTitle>
               <MessageSquare className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">{(stats?.messagesSent ?? 0).toLocaleString()}</div>
               <p className="text-xs text-muted-foreground mt-1">
-                All-time sent
+                Enviados (histórico)
               </p>
             </CardContent>
           </Card>
           
           <Card className="border-l-4 border-l-blue-500 shadow-sm hover:shadow-md transition-shadow">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Active Sessions</CardTitle>
+              <CardTitle className="text-sm font-medium">Sesiones activas</CardTitle>
               <Smartphone className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">{stats?.activeSessions ?? 0} <span className="text-sm font-normal text-muted-foreground">/ {stats?.totalSessions ?? 0}</span></div>
               <p className="text-xs text-muted-foreground mt-1">
-                {!stats ? 'Loading...' : stats.activeSessions === stats.totalSessions ? 'All systems healthy' : 'Some sessions offline'}
+                {!stats ? 'Cargando...' : stats.activeSessions === stats.totalSessions ? 'Todo en orden' : 'Algunas sesiones desconectadas'}
               </p>
             </CardContent>
           </Card>
           
           <Card className="border-l-4 border-l-green-500 shadow-sm hover:shadow-md transition-shadow">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Success Rate</CardTitle>
+              <CardTitle className="text-sm font-medium">Tasa de éxito</CardTitle>
               <Activity className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
@@ -119,20 +183,20 @@ export default function Dashboard() {
                   : 0}%
               </div>
               <p className="text-xs text-muted-foreground mt-1">
-                Session uptime
+                Disponibilidad de sesiones
               </p>
             </CardContent>
           </Card>
           
           <Card className="border-l-4 border-l-red-500 shadow-sm hover:shadow-md transition-shadow">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Blocked Sessions</CardTitle>
+              <CardTitle className="text-sm font-medium">Sesiones bloqueadas</CardTitle>
               <AlertTriangle className="h-4 w-4 text-red-500" />
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold text-red-600">{blockedSessions}</div>
               <p className="text-xs text-muted-foreground mt-1">
-                {blockedSessions > 0 ? 'Action required' : 'All operational'}
+                {blockedSessions > 0 ? 'Requiere atención' : 'Todo operativo'}
               </p>
             </CardContent>
           </Card>
@@ -143,15 +207,15 @@ export default function Dashboard() {
           {/* Main Chart */}
           <Card className="lg:col-span-2 shadow-sm">
             <CardHeader>
-              <CardTitle>Message Volume</CardTitle>
-              <CardDescription>Hourly message throughput for today.</CardDescription>
+              <CardTitle>Volumen de mensajes</CardTitle>
+              <CardDescription>Flujo horario de mensajes de hoy.</CardDescription>
             </CardHeader>
             <CardContent className="h-[300px]">
               {chartData.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
                   <Activity className="h-8 w-8 mb-2 opacity-20" />
-                  <p className="text-sm">No message data available</p>
-                  <p className="text-xs">Chart will populate as messages are sent</p>
+                  <p className="text-sm">No hay datos de mensajes</p>
+                  <p className="text-xs">El gráfico se llenará a medida que se envíen mensajes</p>
                 </div>
               ) : (
               <ResponsiveContainer width="100%" height="100%">
@@ -209,8 +273,8 @@ export default function Dashboard() {
           {/* Active Campaigns */}
           <Card className="shadow-sm flex flex-col">
             <CardHeader>
-              <CardTitle>Active Campaigns</CardTitle>
-              <CardDescription>Real-time progress.</CardDescription>
+              <CardTitle>Campañas activas</CardTitle>
+              <CardDescription>Progreso en tiempo real.</CardDescription>
             </CardHeader>
             <CardContent className="flex-1 flex flex-col gap-6">
               {campaigns?.slice(0, 3).map((campaign) => (
@@ -218,10 +282,10 @@ export default function Dashboard() {
                   <div className="flex items-center justify-between">
                     <div className="flex flex-col">
                       <span className="font-medium text-sm">{campaign.name}</span>
-                      <span className="text-xs text-muted-foreground capitalize">{campaign.status} • {campaign.sent}/{campaign.totalDebtors}</span>
+                      <span className="text-xs text-muted-foreground capitalize">{displayCampaignStatus(campaign.status)} • {campaign.sent}/{campaign.totalDebtors}</span>
                     </div>
                     <Badge variant={campaign.status === 'active' ? 'default' : 'secondary'} className={campaign.status === 'active' ? 'bg-primary/20 text-primary border-primary/20' : ''}>
-                      {campaign.status}
+                      {displayCampaignStatus(campaign.status)}
                     </Badge>
                   </div>
                   <Progress value={campaign.progress} className="h-2" />
@@ -231,7 +295,7 @@ export default function Dashboard() {
               {!campaigns || campaigns.length === 0 && (
                 <div className="flex flex-col items-center justify-center h-full text-muted-foreground py-8">
                   <Send className="h-8 w-8 mb-2 opacity-20" />
-                  <p className="text-sm">No campaigns yet</p>
+                  <p className="text-sm">Aún no hay campañas</p>
                 </div>
               )}
             </CardContent>
@@ -243,10 +307,10 @@ export default function Dashboard() {
           <CardHeader>
             <div className="flex items-center justify-between">
               <div>
-                <CardTitle>Session Health</CardTitle>
-                <CardDescription>Status of connected WhatsApp accounts.</CardDescription>
+                <CardTitle>Salud de sesiones</CardTitle>
+                <CardDescription>Estado de cuentas conectadas de WhatsApp.</CardDescription>
               </div>
-              <Button variant="ghost" size="sm" className="text-xs">View All</Button>
+              <Button variant="ghost" size="sm" className="text-xs">Ver todo</Button>
             </div>
           </CardHeader>
           <CardContent>
@@ -263,24 +327,24 @@ export default function Dashboard() {
                         <Smartphone className="h-5 w-5" />
                       </div>
                       <div>
-                        <p className="font-medium text-sm">{session.phoneNumber || 'Pending...'}</p>
+                        <p className="font-medium text-sm">{session.phoneNumber || 'Pendiente...'}</p>
                         <p className="text-xs text-muted-foreground flex items-center gap-1">
                           ID: {session.id.slice(0, 8)}
-                          {session.battery && <span>• {session.battery}% Battery</span>}
+                          {session.battery && <span>• {session.battery}% batería</span>}
                         </p>
                       </div>
                     </div>
                     
                     <div className="flex items-center gap-4">
                       <div className="text-right hidden sm:block">
-                        <p className="text-sm font-medium">{session.messagesSent.toLocaleString()} sent</p>
+                        <p className="text-sm font-medium">{session.messagesSent.toLocaleString()} enviados</p>
                         <p className="text-xs text-muted-foreground">
-                          {session.lastActive ? `Last active: ${new Date(session.lastActive).toLocaleTimeString()}` : 'Never'}
+                          {session.lastActive ? `Última actividad: ${new Date(session.lastActive).toLocaleTimeString()}` : 'Nunca'}
                         </p>
                       </div>
                       <Badge variant={session.status === 'connected' ? 'outline' : 'destructive'} 
                              className={session.status === 'connected' ? 'bg-green-500/10 text-green-600 border-green-500/20' : ''}>
-                        {session.status}
+                        {displaySessionStatus(session.status)}
                       </Badge>
                       <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive">
                         <Trash2 className="h-4 w-4" />
@@ -292,7 +356,7 @@ export default function Dashboard() {
                 {!sessions || sessions.length === 0 && (
                   <div className="flex flex-col items-center justify-center h-full text-muted-foreground py-8">
                     <Smartphone className="h-8 w-8 mb-2 opacity-20" />
-                    <p className="text-sm">No sessions yet</p>
+                    <p className="text-sm">Aún no hay sesiones</p>
                   </div>
                 )}
               </div>

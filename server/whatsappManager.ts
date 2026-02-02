@@ -1,5 +1,7 @@
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
+import fs from "fs";
+import path from "path";
 import QRCode from 'qrcode';
 import { storage } from './storage';
 import type { Server as SocketServer } from 'socket.io';
@@ -9,14 +11,632 @@ export interface WhatsAppClient {
   client: typeof Client.prototype;
   status: string;
   qrCode?: string;
+  qrRaw?: string;
+}
+
+const clientAny = Client as any;
+if (!clientAny.__injectPatched) {
+  const originalInject = clientAny.prototype?.inject;
+  const inFlight = new WeakMap<object, Promise<unknown>>();
+  const bindingNames = [
+    "onQRChangedEvent",
+    "onCodeReceivedEvent",
+    "onAuthAppStateChangedEvent",
+    "onAppStateHasSyncedEvent",
+  ];
+
+  async function cleanupBindings(page: any) {
+    if (!page || typeof page.removeExposedFunction !== "function") {
+      return;
+    }
+    for (const name of bindingNames) {
+      try {
+        await page.removeExposedFunction(name);
+      } catch (error: any) {
+        const message = error?.message ?? String(error);
+        if (!message.includes("does not exist")) {
+          // Ignore transient errors so inject can continue.
+          await storage.createSystemLog({
+            level: "warning",
+            source: "whatsapp",
+            message: `Failed to cleanup exposed binding ${name}`,
+            metadata: { error: message },
+          });
+        }
+      }
+    }
+  }
+
+  if (typeof originalInject === "function") {
+    clientAny.prototype.inject = function (...args: any[]) {
+      const existing = inFlight.get(this);
+      if (existing) {
+        return existing;
+      }
+      const run = (async () => {
+        try {
+          await cleanupBindings(this?.pupPage);
+          return await originalInject.apply(this, args);
+        } finally {
+          inFlight.delete(this);
+        }
+      })();
+      inFlight.set(this, run);
+      return run;
+    };
+  }
+
+  clientAny.__injectPatched = true;
 }
 
 class WhatsAppManager {
   private clients: Map<string, WhatsAppClient> = new Map();
   private io?: SocketServer;
+  private recentIncomingMessageIds: Map<string, number> = new Map();
+  private pollingTimers: Map<string, NodeJS.Timeout> = new Map();
+  private pollingStartTimes: Map<string, number> = new Map();
+  private pollingLastSeenByChat: Map<string, Map<string, number>> = new Map();
+  private pollingEnabledOverride: boolean | null = null;
+  private pollingIntervalOverrideMs: number | null = null;
+  private qrWindowUntil: Map<string, number> = new Map();
 
   setSocketServer(io: SocketServer) {
     this.io = io;
+  }
+
+  private isManualQrMode(): boolean {
+    return String(process.env.WHATSAPP_QR_MANUAL).toLowerCase() === "true";
+  }
+
+  private getQrWindowMs(): number {
+    const raw = Number(process.env.WHATSAPP_QR_WINDOW_MS);
+    if (Number.isFinite(raw) && raw > 0) {
+      return raw;
+    }
+    return 5 * 60 * 1000;
+  }
+
+  private isQrWindowOpen(sessionId: string): boolean {
+    if (!this.isManualQrMode()) {
+      return true;
+    }
+    const until = this.qrWindowUntil.get(sessionId);
+    if (!until) {
+      return false;
+    }
+    if (Date.now() > until) {
+      this.qrWindowUntil.delete(sessionId);
+      return false;
+    }
+    return true;
+  }
+
+  private clearQrWindow(sessionId: string): void {
+    this.qrWindowUntil.delete(sessionId);
+  }
+
+  async openQrWindow(
+    sessionId: string,
+    windowMs?: number
+  ): Promise<{ qrCode: string | null; expiresAt: string | null }> {
+    const duration = windowMs && windowMs > 0 ? windowMs : this.getQrWindowMs();
+    const expiresAtMs = Date.now() + duration;
+    this.qrWindowUntil.set(sessionId, expiresAtMs);
+
+    const client = this.clients.get(sessionId);
+    if (!client) {
+      return { qrCode: null, expiresAt: new Date(expiresAtMs).toISOString() };
+    }
+
+    if (client.qrRaw) {
+      try {
+        const qrDataUrl = await QRCode.toDataURL(client.qrRaw);
+        client.qrCode = qrDataUrl;
+        client.status = "qr_ready";
+
+        await storage.updateSession(sessionId, {
+          status: "qr_ready",
+          qrCode: qrDataUrl,
+        });
+
+        if (this.io) {
+          this.io.emit("session:qr", { sessionId, qrCode: qrDataUrl });
+        }
+
+        return { qrCode: qrDataUrl, expiresAt: new Date(expiresAtMs).toISOString() };
+      } catch (error) {
+        console.error("Error generating QR code:", error);
+      }
+    }
+
+    return { qrCode: null, expiresAt: new Date(expiresAtMs).toISOString() };
+  }
+
+  private normalizePhoneIdentifier(value: string | undefined | null): string {
+    if (!value) return "";
+    return value.replace(/@.+$/i, "").replace(/\D/g, "");
+  }
+
+  private normalizePhoneForWhatsapp(phone: string): string {
+    const raw = phone.trim();
+    if (!raw) return raw;
+
+    const withoutSuffix = raw.replace(/@c\.us$/i, "");
+    let sanitized = withoutSuffix;
+
+    if (sanitized.startsWith("00")) {
+      sanitized = `+${sanitized.slice(2)}`;
+    }
+
+    let digitsOnly = sanitized.replace(/\D/g, "");
+    if (!digitsOnly) {
+      return "";
+    }
+
+    const defaultCountry = (process.env.SMS_DEFAULT_COUNTRY_CODE ?? "56").trim();
+    const enforceChileMobile =
+      (process.env.SMS_ENFORCE_CHILE_MOBILE ?? "").toLowerCase() === "true";
+
+    if (enforceChileMobile && defaultCountry === "56") {
+      if (digitsOnly.length === 10 && digitsOnly.startsWith("09")) {
+        digitsOnly = digitsOnly.slice(1);
+      }
+
+      if (digitsOnly.length === 9 && digitsOnly.startsWith("9")) {
+        return `56${digitsOnly}`;
+      }
+
+      if (digitsOnly.length === 11 && digitsOnly.startsWith("569")) {
+        return digitsOnly;
+      }
+    }
+
+    if (defaultCountry) {
+      if (digitsOnly.startsWith(defaultCountry)) {
+        return digitsOnly;
+      }
+      return `${defaultCountry}${digitsOnly}`;
+    }
+
+    return digitsOnly;
+  }
+
+  private shouldProcessIncomingMessage(msg: any): boolean {
+    const messageId =
+      msg?.id?._serialized ?? msg?.id?.id ?? msg?.id ?? "";
+    if (!messageId) return true;
+
+    const now = Date.now();
+    const ttlMs = 5 * 60 * 1000;
+    this.recentIncomingMessageIds.forEach((ts, id) => {
+      if (now - ts > ttlMs) {
+        this.recentIncomingMessageIds.delete(id);
+      }
+    });
+
+    if (this.recentIncomingMessageIds.has(messageId)) {
+      return false;
+    }
+
+    this.recentIncomingMessageIds.set(messageId, now);
+    return true;
+  }
+
+  private stopIncomingPolling(sessionId: string) {
+    const timer = this.pollingTimers.get(sessionId);
+    if (timer) {
+      clearInterval(timer);
+      this.pollingTimers.delete(sessionId);
+    }
+    this.pollingStartTimes.delete(sessionId);
+    this.pollingLastSeenByChat.delete(sessionId);
+  }
+
+  private resolveUserAgent(): string | null {
+    const envValue = (
+      process.env.WHATSAPP_USER_AGENT ??
+      process.env.PUPPETEER_USER_AGENT ??
+      ""
+    ).trim();
+    if (envValue) {
+      return envValue;
+    }
+
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  }
+
+  private getPollingEnabled(): boolean {
+    if (this.pollingEnabledOverride !== null) {
+      return this.pollingEnabledOverride;
+    }
+    return (process.env.WHATSAPP_POLL_ENABLED ?? "").toLowerCase() === "true";
+  }
+
+  private getPollingIntervalMs(): number | null {
+    if (
+      this.pollingIntervalOverrideMs !== null &&
+      Number.isFinite(this.pollingIntervalOverrideMs) &&
+      this.pollingIntervalOverrideMs > 0
+    ) {
+      return Math.floor(this.pollingIntervalOverrideMs);
+    }
+
+    const envValue = Number(process.env.WHATSAPP_POLL_INTERVAL_MS ?? "15000");
+    if (!Number.isFinite(envValue) || envValue <= 0) {
+      return null;
+    }
+    return Math.floor(envValue);
+  }
+
+  private syncPollingForSessions() {
+    const enabled = this.getPollingEnabled();
+    this.clients.forEach((client, sessionId) => {
+      if (client.status !== "connected") {
+        this.stopIncomingPolling(sessionId);
+        return;
+      }
+      if (enabled) {
+        this.startIncomingPolling(sessionId, client.client);
+      } else {
+        this.stopIncomingPolling(sessionId);
+      }
+    });
+  }
+
+  private restartPollingForSessions() {
+    this.clients.forEach((_, sessionId) => {
+      this.stopIncomingPolling(sessionId);
+    });
+    this.syncPollingForSessions();
+  }
+
+  getPollingSettings() {
+    const enabled = this.getPollingEnabled();
+    const intervalMs = this.getPollingIntervalMs() ?? 0;
+    return {
+      enabled,
+      intervalMs,
+      source:
+        this.pollingEnabledOverride !== null || this.pollingIntervalOverrideMs !== null
+          ? "override"
+          : "env",
+      connectedSessions: this.getConnectedSessionIds().length,
+      activePollingSessions: this.pollingTimers.size,
+    };
+  }
+
+  setPollingEnabled(enabled: boolean) {
+    this.pollingEnabledOverride = enabled;
+    this.syncPollingForSessions();
+  }
+
+  setPollingInterval(intervalMs?: number | null) {
+    if (intervalMs === undefined) {
+      return;
+    }
+    if (intervalMs === null) {
+      this.pollingIntervalOverrideMs = null;
+      this.restartPollingForSessions();
+      return;
+    }
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      throw new Error("Invalid polling interval");
+    }
+    this.pollingIntervalOverrideMs = Math.floor(intervalMs);
+    this.restartPollingForSessions();
+  }
+
+  private async patchChatModel(sessionId: string, client: any) {
+    try {
+      const page = client?.pupPage;
+      if (!page?.evaluate) {
+        return;
+      }
+
+      await page.evaluate(() => {
+        const w = window as any;
+        if (!w?.WWebJS || w.WWebJS.__safeChatModelPatch) {
+          return;
+        }
+
+        w.WWebJS.__safeChatModelPatch = true;
+        const original = w.WWebJS.getChatModel;
+
+        w.WWebJS.getChatModel = async (chat: any, opts: any = {}) => {
+          try {
+            return await original(chat, opts);
+          } catch {
+            try {
+              const model = chat?.serialize ? chat.serialize() : null;
+              if (!model) return null;
+
+              model.isGroup = Boolean(chat?.groupMetadata);
+              model.isMuted = chat?.mute?.expiration !== 0;
+
+              if (opts?.isChannel && w.Store?.ChatGetters?.getIsNewsletter) {
+                model.isChannel = Boolean(w.Store.ChatGetters.getIsNewsletter(chat));
+              } else {
+                model.formattedTitle = chat?.formattedTitle;
+              }
+
+              delete model.msgs;
+              delete model.msgUnsyncedButtonReplyMsgs;
+              delete model.unsyncedButtonReplies;
+
+              return model;
+            } catch {
+              return null;
+            }
+          }
+        };
+      });
+    } catch (error: any) {
+      await storage.createSystemLog({
+        level: "warning",
+        source: "whatsapp",
+        message: `Failed to patch chat model for session ${sessionId}`,
+        metadata: { sessionId, error: error?.message ?? String(error) },
+      });
+    }
+  }
+
+  private startIncomingPolling(sessionId: string, client: any) {
+    if (this.pollingTimers.has(sessionId)) {
+      return;
+    }
+
+    if (!this.getPollingEnabled()) {
+      return;
+    }
+
+    const intervalMs = this.getPollingIntervalMs();
+    if (!intervalMs) {
+      return;
+    }
+
+    this.pollingStartTimes.set(sessionId, Date.now());
+    this.pollingLastSeenByChat.set(sessionId, new Map());
+
+    let polling = false;
+    const timer = setInterval(async () => {
+      if (polling) return;
+      polling = true;
+
+      try {
+        const state = await client.getState().catch(() => null);
+        if (state && state !== "CONNECTED") {
+          polling = false;
+          return;
+        }
+
+        const chats = await client.getChats();
+        const lastSeenByChat =
+          this.pollingLastSeenByChat.get(sessionId) ?? new Map<string, number>();
+        const startTime = this.pollingStartTimes.get(sessionId) ?? 0;
+
+        for (const chat of chats ?? []) {
+          if (chat?.isGroup) continue;
+          const chatId = String(chat?.id?._serialized ?? chat?.id ?? "");
+          const unread = Number(chat?.unreadCount ?? 0);
+          const limit = Math.min(unread > 0 ? unread : 5, 25);
+          const messages = await chat.fetchMessages({ limit, fromMe: false });
+          if (!messages || messages.length === 0) continue;
+
+          let lastSeen = lastSeenByChat.get(chatId) ?? startTime;
+          const sorted = [...messages].sort((a, b) => {
+            const aTs = typeof a?.timestamp === "number" ? a.timestamp : 0;
+            const bTs = typeof b?.timestamp === "number" ? b.timestamp : 0;
+            return aTs - bTs;
+          });
+
+          for (const msg of sorted) {
+            const msgTs =
+              typeof msg?.timestamp === "number"
+                ? msg.timestamp * 1000
+                : Date.now();
+            if (msgTs <= lastSeen) continue;
+            await this.handleIncomingMessage(sessionId, msg, "poll");
+            if (msgTs > lastSeen) lastSeen = msgTs;
+          }
+
+          if (chatId) {
+            lastSeenByChat.set(chatId, lastSeen);
+          }
+        }
+
+        this.pollingLastSeenByChat.set(sessionId, lastSeenByChat);
+      } catch (error: any) {
+        await storage.createSystemLog({
+          level: "warning",
+          source: "whatsapp",
+          message: `Incoming polling failed for session ${sessionId}`,
+          metadata: { sessionId, error: error?.message ?? String(error) },
+        });
+      } finally {
+        polling = false;
+      }
+    }, intervalMs);
+
+    this.pollingTimers.set(sessionId, timer);
+  }
+
+  private async handleIncomingMessage(
+    sessionId: string,
+    msg: any,
+    source: string
+  ) {
+    const messageId =
+      msg?.id?._serialized ?? msg?.id?.id ?? msg?.id ?? null;
+    if (!this.shouldProcessIncomingMessage(msg)) {
+      return;
+    }
+
+    const msgType = String(msg?.type ?? "").toLowerCase();
+    if (msgType === "e2e_notification") {
+      return;
+    }
+
+    if (msg.fromMe) {
+      await storage.createSystemLog({
+        level: "info",
+        source: "whatsapp",
+        message: `Ignored fromMe message (${source})`,
+        metadata: {
+          sessionId,
+          rawFrom: msg.from,
+          id: messageId,
+          type: msg.type,
+        },
+      });
+      return;
+    }
+
+    try {
+      const phone = await this.resolveIncomingPhone(msg);
+      const debtor = await storage.getDebtorByPhone(phone);
+      const sentAt =
+        typeof msg.timestamp === "number"
+          ? new Date(msg.timestamp * 1000)
+          : new Date();
+
+      const rawBody = typeof msg.body === "string" ? msg.body.trim() : "";
+      const fallbackType =
+        typeof msg.type === "string" && msg.type ? msg.type : "media";
+      const content = rawBody || `[${fallbackType}]`;
+
+      const createdMessage = await storage.createMessage({
+        sessionId,
+        debtorId: debtor?.id,
+        campaignId: debtor?.campaignId,
+        phone,
+        content,
+        status: "received",
+        sentAt,
+      });
+
+      if (debtor?.id) {
+        await storage.updateDebtor(debtor.id, {
+          lastContact: sentAt,
+        });
+      }
+
+      await storage.createSystemLog({
+        level: "info",
+        source: "whatsapp",
+        message: `Incoming message from ${msg.from}`,
+        metadata: {
+          sessionId,
+          phone,
+          rawFrom: msg.from,
+          debtorId: debtor?.id,
+          campaignId: debtor?.campaignId,
+          type: msg.type,
+          hasBody: Boolean(rawBody),
+          bodyLength: rawBody.length,
+          isGroup: String(msg.from ?? "").endsWith("@g.us"),
+          eventSource: source,
+          id: messageId,
+        },
+      });
+
+      if (this.io) {
+        this.io.emit("message:received", createdMessage);
+      }
+
+      console.log("Message received:", msg.from, msg.body);
+    } catch (error: any) {
+      console.error("Error handling incoming message:", error?.message || error);
+      await storage.createSystemLog({
+        level: "error",
+        source: "whatsapp",
+        message: `Failed to handle incoming message: ${error?.message || error}`,
+        metadata: { sessionId, phone: msg.from, id: messageId },
+      });
+    }
+  }
+
+  private async cleanupDuplicateSessions(
+    currentSessionId: string,
+    phoneNumber: string | undefined | null
+  ): Promise<string[]> {
+    const normalizedPhone = this.normalizePhoneIdentifier(phoneNumber);
+    if (!normalizedPhone) {
+      return [];
+    }
+
+    const sessions = await storage.getSessions();
+    const duplicates = sessions.filter(
+      (s) =>
+        s.id !== currentSessionId &&
+        this.normalizePhoneIdentifier(s.phoneNumber) === normalizedPhone
+    );
+
+    if (duplicates.length === 0) {
+      return [];
+    }
+
+    for (const duplicate of duplicates) {
+      const duplicateClient = this.clients.get(duplicate.id);
+      if (duplicateClient) {
+        try {
+          await duplicateClient.client.destroy();
+        } catch (error) {
+          console.warn(
+            "Failed to destroy duplicate in-memory session:",
+            duplicate.id,
+            error
+          );
+        } finally {
+          this.clients.delete(duplicate.id);
+        }
+      }
+
+      // Detach the phone number from the duplicate record so it can be relinked later.
+      await storage.updateSession(duplicate.id, {
+        status: "disconnected",
+        phoneNumber: null,
+        qrCode: null,
+      });
+
+      if (this.io) {
+        this.io.emit("session:updated", { id: duplicate.id });
+      }
+    }
+
+    await storage.createSystemLog({
+      level: "warning",
+      source: "whatsapp",
+      message: `Duplicate phone ${normalizedPhone} detected. Cleaned ${duplicates.length} session(s).`,
+      metadata: {
+        phoneNumber: normalizedPhone,
+        currentSessionId,
+        duplicateSessionIds: duplicates.map((d) => d.id),
+      },
+    });
+
+    return duplicates.map((d) => d.id);
+  }
+
+  private async resolveIncomingPhone(msg: any): Promise<string> {
+    const rawFrom = String(msg?.from ?? "");
+    let candidate = rawFrom;
+
+    // WhatsApp can send @lid identifiers. Try to resolve a real number.
+    if (rawFrom.endsWith("@lid")) {
+      try {
+        const contact = await msg.getContact();
+        candidate =
+          contact?.number ??
+          contact?.id?.user ??
+          contact?.id?._serialized ??
+          rawFrom;
+      } catch {
+        candidate = rawFrom;
+      }
+    }
+
+    const normalized = this.normalizePhoneIdentifier(candidate);
+    return normalized || this.normalizePhoneIdentifier(rawFrom) || candidate;
   }
 
   async createSession(sessionId: string): Promise<void> {
@@ -24,24 +644,52 @@ class WhatsAppManager {
       throw new Error('Session already exists');
     }
 
+    const resolveChromePath = () => {
+      const envPath = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
+      if (envPath && fs.existsSync(envPath)) {
+        return envPath;
+      }
+
+      const candidates =
+        process.platform === "win32"
+          ? [
+              "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+              "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+              "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+              "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+            ]
+          : process.platform === "darwin"
+            ? [
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+              ]
+            : ["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"];
+
+      return candidates.find((candidate) => fs.existsSync(candidate));
+    };
+
+    const executablePath = resolveChromePath();
+    const userAgent = this.resolveUserAgent();
+    const puppeteerArgs = [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+    ];
+
+    if (userAgent) {
+      puppeteerArgs.push(`--user-agent=${userAgent}`);
+    }
+
+    // CONFIGURACIÓN CORREGIDA CON LOCAL AUTH
     const client = new Client({
       authStrategy: new LocalAuth({
-        clientId: sessionId
+        clientId: sessionId, // ESTA LÍNEA ES LA CLAVE
+        dataPath: './.wwebjs_auth'
       }),
       puppeteer: {
-        headless: true,
-        executablePath: '/nix/store/zi4f80l169xlmivz8vja8wlphq74qqk0-chromium-125.0.6422.141/bin/chromium',
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
-          '--disable-gpu',
-          '--disable-software-rasterizer'
-        ]
+        executablePath,
+        args: puppeteerArgs,
       }
     });
 
@@ -52,8 +700,57 @@ class WhatsAppManager {
     };
 
     this.clients.set(sessionId, whatsappClient);
+    let authCheckTimer: NodeJS.Timeout | null = null;
+
+    const markConnected = async (source: string) => {
+      if (whatsappClient.status === 'connected') {
+        return;
+      }
+
+      this.clearQrWindow(sessionId);
+
+      const phoneNumber = client.info?.wid?.user;
+      if (phoneNumber) {
+        try {
+          await this.cleanupDuplicateSessions(sessionId, phoneNumber);
+        } catch (error) {
+          console.warn("Failed to cleanup duplicate sessions:", error);
+        }
+      }
+      whatsappClient.status = 'connected';
+
+      await storage.updateSession(sessionId, {
+        status: 'connected',
+        phoneNumber: phoneNumber ?? undefined,
+        qrCode: null,
+        lastActive: new Date()
+      });
+
+      if (this.io) {
+        this.io.emit('session:ready', {
+          sessionId,
+          phoneNumber
+        });
+      }
+
+      await storage.createSystemLog({
+        level: 'info',
+        source: 'whatsapp',
+        message: `Session ${sessionId} connected (${source})`,
+        metadata: { sessionId, source, phoneNumber }
+      });
+
+      await this.patchChatModel(sessionId, client);
+      this.startIncomingPolling(sessionId, client);
+    };
 
     client.on('qr', async (qr) => {
+      whatsappClient.qrRaw = qr;
+
+      if (this.isManualQrMode() && !this.isQrWindowOpen(sessionId)) {
+        return;
+      }
+
       console.log('QR Code generated for session:', sessionId);
       
       try {
@@ -79,41 +776,97 @@ class WhatsAppManager {
 
     client.on('ready', async () => {
       console.log('WhatsApp client ready:', sessionId);
-      whatsappClient.status = 'connected';
-      
-      const info = client.info;
-      const phoneNumber = info?.wid?.user || 'Unknown';
-      
-      await storage.updateSession(sessionId, {
-        status: 'connected',
-        phoneNumber: phoneNumber,
-        qrCode: null,
-        lastActive: new Date()
-      });
 
-      if (this.io) {
-        this.io.emit('session:ready', {
-          sessionId,
-          phoneNumber
-        });
-      }
-
-      await storage.createSystemLog({
-        level: 'info',
-        source: 'whatsapp',
-        message: `Session ${sessionId} connected successfully`,
-        metadata: { phoneNumber }
-      });
+      await markConnected("ready");
     });
 
-    client.on('authenticated', () => {
+    client.on('authenticated', async () => {
       console.log('Client authenticated:', sessionId);
       whatsappClient.status = 'authenticated';
+
+      try {
+        await storage.updateSession(sessionId, {
+          status: 'authenticated',
+          qrCode: null,
+          lastActive: new Date()
+        });
+
+        if (this.io) {
+          this.io.emit('session:updated', { id: sessionId });
+        }
+
+        await storage.createSystemLog({
+          level: 'info',
+          source: 'whatsapp',
+          message: `Session ${sessionId} authenticated`,
+          metadata: { sessionId }
+        });
+      } catch (error) {
+        console.warn('Failed to persist authenticated status:', error);
+      }
+
+      // Fallback: poll state for a short window after authentication.
+      if (authCheckTimer) {
+        clearInterval(authCheckTimer);
+        authCheckTimer = null;
+      }
+
+      let attempts = 0;
+      const maxAttempts = 15;
+
+      authCheckTimer = setInterval(async () => {
+        attempts += 1;
+        try {
+          const state = await client.getState();
+          if (state === "CONNECTED") {
+            if (authCheckTimer) {
+              clearInterval(authCheckTimer);
+              authCheckTimer = null;
+            }
+            await markConnected("authenticated-check");
+            return;
+          }
+
+          if (attempts >= maxAttempts) {
+            if (authCheckTimer) {
+              clearInterval(authCheckTimer);
+              authCheckTimer = null;
+            }
+
+            await storage.createSystemLog({
+              level: "warning",
+              source: "whatsapp",
+              message: `Session ${sessionId} stuck after authentication`,
+              metadata: { sessionId, state }
+            });
+          }
+        } catch (error) {
+          if (attempts >= maxAttempts && authCheckTimer) {
+            clearInterval(authCheckTimer);
+            authCheckTimer = null;
+          }
+          console.warn("Failed to verify state after authentication:", error);
+        }
+      }, 2000);
+    });
+
+    client.on('change_state', async (state) => {
+      console.log('WhatsApp state changed:', sessionId, state);
+
+      if (state === 'CONNECTED' && whatsappClient.status !== 'connected') {
+        try {
+          await markConnected("state-change");
+        } catch (error) {
+          console.warn('Failed to update session from state change:', error);
+        }
+      }
     });
 
     client.on('auth_failure', async (msg) => {
       console.error('Authentication failed:', sessionId, msg);
       whatsappClient.status = 'auth_failed';
+      this.clearQrWindow(sessionId);
+      this.stopIncomingPolling(sessionId);
       
       await storage.updateSession(sessionId, {
         status: 'auth_failed'
@@ -137,6 +890,13 @@ class WhatsAppManager {
     client.on('disconnected', async (reason) => {
       console.log('Client disconnected:', sessionId, reason);
       whatsappClient.status = 'disconnected';
+      this.clearQrWindow(sessionId);
+      this.stopIncomingPolling(sessionId);
+
+      if (authCheckTimer) {
+        clearInterval(authCheckTimer);
+        authCheckTimer = null;
+      }
       
       await storage.updateSession(sessionId, {
         status: 'disconnected'
@@ -157,8 +917,12 @@ class WhatsAppManager {
       });
     });
 
-    client.on('message', async (msg) => {
-      console.log('Message received:', msg.from, msg.body);
+    client.on("message", (msg) => {
+      void this.handleIncomingMessage(sessionId, msg, "message");
+    });
+
+    client.on("message_create", (msg) => {
+      void this.handleIncomingMessage(sessionId, msg, "message_create");
     });
 
     try {
@@ -172,19 +936,28 @@ class WhatsAppManager {
 
   async destroySession(sessionId: string): Promise<void> {
     const whatsappClient = this.clients.get(sessionId);
+    this.clearQrWindow(sessionId);
     
     try {
       if (whatsappClient) {
+        this.stopIncomingPolling(sessionId);
         await whatsappClient.client.destroy();
         this.clients.delete(sessionId);
       }
       
+      // NO eliminar la carpeta de autenticación si quieres persistencia
+      /*
       const fs = await import('fs');
       const path = await import('path');
       const sessionDir = path.join(process.cwd(), '.wwebjs_auth', `session-${sessionId}`);
       if (fs.existsSync(sessionDir)) {
         fs.rmSync(sessionDir, { recursive: true, force: true });
       }
+      */
+      
+      await storage.updateSession(sessionId, {
+        status: 'disconnected'
+      });
       
       await storage.createSystemLog({
         level: 'info',
@@ -196,6 +969,34 @@ class WhatsAppManager {
       console.log('Session destroyed:', sessionId);
     } catch (error) {
       console.error('Error destroying session:', error);
+    }
+  }
+
+  async resetSessionAuth(sessionId: string): Promise<void> {
+    try {
+      await this.destroySession(sessionId);
+
+      const sessionDir = path.join(process.cwd(), ".wwebjs_auth", `session-${sessionId}`);
+      if (fs.existsSync(sessionDir)) {
+        fs.rmSync(sessionDir, { recursive: true, force: true });
+      }
+
+      await storage.updateSession(sessionId, {
+        status: "initializing",
+        qrCode: null,
+      });
+
+      await this.createSession(sessionId);
+
+      await storage.createSystemLog({
+        level: "info",
+        source: "whatsapp",
+        message: `Session ${sessionId} auth reset`,
+        metadata: {},
+      });
+    } catch (error) {
+      console.error("Error resetting auth:", error);
+      throw error;
     }
   }
 
@@ -211,15 +1012,12 @@ class WhatsAppManager {
     }
 
     try {
-      let cleanNumber = phoneNumber.replace(/[\s\-\(\)\+]/g, '');
-      
-      if (!cleanNumber.match(/^\d+$/)) {
+      const normalized = this.normalizePhoneForWhatsapp(phoneNumber);
+      if (!normalized || !normalized.match(/^\d+$/)) {
         throw new Error(`Invalid phone number format: ${phoneNumber}`);
       }
-      
-      const formattedNumber = cleanNumber.includes('@c.us') 
-        ? cleanNumber 
-        : `${cleanNumber}@c.us`;
+
+      const formattedNumber = `${normalized}@c.us`;
       
       const isRegistered = await whatsappClient.client.isRegisteredUser(formattedNumber);
       if (!isRegistered) {
@@ -279,22 +1077,22 @@ class WhatsAppManager {
     console.log('Restoring sessions from database...');
     
     const sessions = await storage.getSessions();
-    const connectedSessions = sessions.filter(s => 
-      s.status === 'connected' || s.status === 'qr_ready'
-    );
+    console.log(`Found ${sessions.length} sessions in database`);
 
-    console.log(`Found ${connectedSessions.length} sessions to restore`);
-
-    for (const session of connectedSessions) {
+    for (const session of sessions) {
       try {
-        console.log('Restoring session:', session.id);
-        
-        await storage.updateSession(session.id, {
-          status: 'reconnecting'
-        });
-        
-        await this.createSession(session.id);
-        console.log('Session restoration initiated:', session.id);
+        // Solo restaurar sesiones que estaban conectadas
+        if (session.status === 'connected') {
+          console.log('Attempting to restore connected session:', session.id);
+          
+          await storage.updateSession(session.id, {
+            status: 'reconnecting',
+            qrCode: null
+          });
+          
+          await this.createSession(session.id);
+          console.log('Session restoration initiated:', session.id);
+        }
       } catch (error: any) {
         console.error('Error restoring session:', session.id, error.message);
         

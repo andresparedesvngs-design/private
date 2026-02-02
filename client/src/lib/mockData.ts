@@ -1,5 +1,5 @@
 
-import { addDays, subDays, subHours, subMinutes } from "date-fns";
+import { addDays, subDays, subHours } from "date-fns";
 
 export type SessionStatus = 'connected' | 'disconnected' | 'qr_ready' | 'initializing' | 'auth_failed';
 
@@ -50,28 +50,63 @@ export interface Debtor {
   processStatus: 'disponible' | 'procesando' | 'completado' | 'fallado';
 }
 
+// IDs estilo MongoDB ObjectId (24 caracteres hexadecimales)
+const generateObjectId = (prefix: string, index: number) => {
+  const hex = index.toString(16).padStart(12, '0');
+  return `${prefix}${hex}`.padEnd(24, '0');
+};
+
 export const mockSessions: WhatsAppSession[] = [
-  { id: '1', phoneNumber: '+56 9 1234 5678', status: 'connected', lastActive: 'Now', battery: 85, quality: 100, messagesSent: 1250 },
-  { id: '2', phoneNumber: '+56 9 8765 4321', status: 'connected', lastActive: '5m ago', battery: 62, quality: 90, messagesSent: 890 },
-  { id: '3', phoneNumber: '+56 9 1122 3344', status: 'qr_ready', lastActive: 'Never', messagesSent: 0 },
-  { id: '4', phoneNumber: '+56 9 5566 7788', status: 'disconnected', lastActive: '2h ago', messagesSent: 450, isBlocked: true },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79943', 1001), 
+    phoneNumber: '+56 9 1234 5678', 
+    status: 'connected', 
+    lastActive: new Date().toISOString(), 
+    battery: 85, 
+    quality: 100, 
+    messagesSent: 1250 
+  },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79943', 1002), 
+    phoneNumber: '+56 9 8765 4321', 
+    status: 'connected', 
+    lastActive: subHours(new Date(), 1).toISOString(), 
+    battery: 62, 
+    quality: 90, 
+    messagesSent: 890 
+  },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79943', 1003), 
+    phoneNumber: '+56 9 1122 3344', 
+    status: 'qr_ready', 
+    lastActive: new Date().toISOString(), 
+    messagesSent: 0 
+  },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79943', 1004), 
+    phoneNumber: '+56 9 5566 7788', 
+    status: 'disconnected', 
+    lastActive: subHours(new Date(), 2).toISOString(), 
+    messagesSent: 450, 
+    isBlocked: true 
+  },
 ];
 
 export const mockPools: Pool[] = [
   { 
-    id: 'pool-1', 
+    id: generateObjectId('507f1f77bcf86cd79944', 2001), 
     name: 'Pool Principal (Competitivo)', 
     mode: 'competitivo', 
-    sessions: ['1', '2'], 
+    sessions: [mockSessions[0].id, mockSessions[1].id], 
     delayBase: 8000, 
     delayVariacion: 2000,
     active: true 
   },
   { 
-    id: 'pool-2', 
+    id: generateObjectId('507f1f77bcf86cd79944', 2002), 
     name: 'Pool Backup (Turnos)', 
     mode: 'turnos_fijos', 
-    sessions: ['1'], 
+    sessions: [mockSessions[0].id], 
     delayBase: 15000, 
     delayVariacion: 5000,
     active: false 
@@ -79,17 +114,102 @@ export const mockPools: Pool[] = [
 ];
 
 export const mockCampaigns: Campaign[] = [
-  { id: '1', name: 'Cobranza Febrero - Lote A', status: 'active', progress: 45, total: 1200, sent: 540, failed: 12, startTime: subHours(new Date(), 2).toISOString(), poolId: 'pool-1' },
-  { id: '2', name: 'Recordatorio Preventivo', status: 'completed', progress: 100, total: 500, sent: 495, failed: 5, startTime: subDays(new Date(), 1).toISOString(), poolId: 'pool-1' },
-  { id: '3', name: 'Oferta Regularización', status: 'paused', progress: 12, total: 3000, sent: 360, failed: 0, startTime: subHours(new Date(), 4).toISOString(), poolId: 'pool-2' },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79945', 3001), 
+    name: 'Cobranza Febrero - Lote A', 
+    status: 'active', 
+    progress: 45, 
+    total: 1200, 
+    sent: 540, 
+    failed: 12, 
+    startTime: subHours(new Date(), 2).toISOString(), 
+    poolId: mockPools[0].id 
+  },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79945', 3002), 
+    name: 'Recordatorio Preventivo', 
+    status: 'completed', 
+    progress: 100, 
+    total: 500, 
+    sent: 495, 
+    failed: 5, 
+    startTime: subDays(new Date(), 1).toISOString(), 
+    poolId: mockPools[0].id 
+  },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79945', 3003), 
+    name: 'Oferta Regularización', 
+    status: 'paused', 
+    progress: 12, 
+    total: 3000, 
+    sent: 360, 
+    failed: 0, 
+    startTime: subHours(new Date(), 4).toISOString(), 
+    poolId: mockPools[1].id 
+  },
 ];
 
 export const mockDebtors: Debtor[] = [
-  { id: '1', name: 'Juan Pérez', phone: '+56 9 4935 1842', debtAmount: 150000, dueDate: subDays(new Date(), 5).toISOString(), status: 'read', tags: ['vip', 'overdue'], executive: 'Ana García', rut: '12.345.678-9', processStatus: 'completado' },
-  { id: '2', name: 'Maria Gonzalez', phone: '+56 9 9124 7408', debtAmount: 45000, dueDate: addDays(new Date(), 2).toISOString(), status: 'replied', tags: ['new'], executive: 'Carlos Ruiz', rut: '9.876.543-2', processStatus: 'completado' },
-  { id: '3', name: 'Carlos Ruiz', phone: '+56 9 2761 5358', debtAmount: 890000, dueDate: subDays(new Date(), 30).toISOString(), status: 'sent', tags: ['critical'], executive: 'Ana García', rut: '15.678.901-3', processStatus: 'procesando' },
-  { id: '4', name: 'Ana Silva', phone: '+56 9 3344 5566', debtAmount: 12500, dueDate: subDays(new Date(), 1).toISOString(), status: 'pending', tags: [], executive: 'Pedro López', rut: '18.901.234-5', processStatus: 'disponible' },
-  { id: '5', name: 'Pedro López', phone: '+56 9 7788 9900', debtAmount: 0, dueDate: subDays(new Date(), 10).toISOString(), status: 'blocked', tags: ['blocked'], executive: 'Ana García', rut: '10.123.456-7', processStatus: 'fallado' },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79946', 4001), 
+    name: 'Juan Pérez', 
+    phone: '+56 9 4935 1842', 
+    debtAmount: 150000, 
+    dueDate: subDays(new Date(), 5).toISOString(), 
+    status: 'read', 
+    tags: ['vip', 'overdue'], 
+    executive: 'Ana García', 
+    rut: '12.345.678-9', 
+    processStatus: 'completado' 
+  },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79946', 4002), 
+    name: 'Maria Gonzalez', 
+    phone: '+56 9 9124 7408', 
+    debtAmount: 45000, 
+    dueDate: addDays(new Date(), 2).toISOString(), 
+    status: 'replied', 
+    tags: ['new'], 
+    executive: 'Carlos Ruiz', 
+    rut: '9.876.543-2', 
+    processStatus: 'completado' 
+  },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79946', 4003), 
+    name: 'Carlos Ruiz', 
+    phone: '+56 9 2761 5358', 
+    debtAmount: 890000, 
+    dueDate: subDays(new Date(), 30).toISOString(), 
+    status: 'sent', 
+    tags: ['critical'], 
+    executive: 'Ana García', 
+    rut: '15.678.901-3', 
+    processStatus: 'procesando' 
+  },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79946', 4004), 
+    name: 'Ana Silva', 
+    phone: '+56 9 3344 5566', 
+    debtAmount: 12500, 
+    dueDate: subDays(new Date(), 1).toISOString(), 
+    status: 'pending', 
+    tags: [], 
+    executive: 'Pedro López', 
+    rut: '18.901.234-5', 
+    processStatus: 'disponible' 
+  },
+  { 
+    id: generateObjectId('507f1f77bcf86cd79946', 4005), 
+    name: 'Pedro López', 
+    phone: '+56 9 7788 9900', 
+    debtAmount: 0, 
+    dueDate: subDays(new Date(), 10).toISOString(), 
+    status: 'blocked', 
+    tags: ['blocked'], 
+    executive: 'Ana García', 
+    rut: '10.123.456-7', 
+    processStatus: 'fallado' 
+  },
 ];
 
 export const stats = {

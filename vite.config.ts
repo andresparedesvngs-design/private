@@ -40,8 +40,8 @@ export default defineConfig({
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
   },
-  server: {
-    host: "0.0.0.0",
+   server: {
+    host: "localhost",  // ← CAMBIADO
     allowedHosts: true,
     fs: {
       strict: true,

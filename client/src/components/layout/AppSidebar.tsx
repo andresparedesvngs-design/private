@@ -1,4 +1,4 @@
-import {
+﻿import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
@@ -26,35 +26,42 @@ import {
 } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import logoUrl from "@assets/generated_images/minimalist_green_abstract_hexagon_logo_for_whatsapp_marketing_app.png";
+import { useAuthMe, useLogout } from "@/lib/api";
+import { disconnectSocket } from "@/lib/socket";
 
 const items = [
   {
-    title: "Dashboard",
+    title: "Panel",
     url: "/",
     icon: LayoutDashboard,
   },
   {
-    title: "Sessions",
+    title: "Sesiones",
     url: "/sessions",
     icon: Smartphone,
   },
   {
-    title: "Campaigns",
+    title: "Campañas",
     url: "/campaigns",
     icon: Send,
   },
   {
-    title: "Messages",
+    title: "Mensajes",
     url: "/messages",
     icon: MessageSquareText,
   },
   {
-    title: "Debtors",
+    title: "Deudores",
     url: "/debtors",
     icon: Users,
   },
   {
-    title: "System Logs",
+    title: "Contactos",
+    url: "/contacts",
+    icon: Database,
+  },
+  {
+    title: "Registros",
     url: "/logs",
     icon: Terminal,
   },
@@ -62,12 +69,12 @@ const items = [
 
 const systemItems = [
   {
-    title: "Cleanup Service",
+    title: "Servicio de limpieza",
     url: "/cleanup",
     icon: ShieldAlert,
   },
   {
-    title: "Settings",
+    title: "Configuración",
     url: "/settings",
     icon: Settings,
   }
@@ -75,6 +82,19 @@ const systemItems = [
 
 export function AppSidebar() {
   const [location] = useLocation();
+  const { data: user } = useAuthMe();
+  const logout = useLogout();
+
+  const handleLogout = async () => {
+    try {
+      await logout.mutateAsync();
+    } catch (error) {
+      console.error("No se pudo cerrar sesión:", error);
+    } finally {
+      disconnectSocket();
+    }
+  };
+  const initials = (user?.username ?? "AD").slice(0, 2).toUpperCase();
 
   return (
     <Sidebar collapsible="icon">
@@ -92,7 +112,7 @@ export function AppSidebar() {
       
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Platform</SidebarGroupLabel>
+          <SidebarGroupLabel>Plataforma</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {items.map((item) => (
@@ -115,7 +135,7 @@ export function AppSidebar() {
         </SidebarGroup>
 
         <SidebarGroup className="mt-auto">
-          <SidebarGroupLabel>System</SidebarGroupLabel>
+          <SidebarGroupLabel>Sistema</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {systemItems.map((item) => (
@@ -141,13 +161,23 @@ export function AppSidebar() {
       <SidebarFooter className="border-t border-sidebar-border p-4">
         <div className="flex items-center gap-2 group-data-[collapsible=icon]:justify-center">
           <div className="h-8 w-8 rounded-full bg-sidebar-accent flex items-center justify-center text-xs font-bold text-sidebar-foreground">
-            AD
+            {initials}
           </div>
           <div className="flex flex-col gap-0.5 overflow-hidden group-data-[collapsible=icon]:hidden">
-            <span className="text-sm font-medium truncate">Admin User</span>
-            <span className="text-xs text-muted-foreground truncate">admin@system.local</span>
+            <span className="text-sm font-medium truncate">
+              {user?.username ?? "Administrador"}
+            </span>
+            <span className="text-xs text-muted-foreground truncate">
+              Rol: {user?.role ?? "admin"}
+            </span>
           </div>
-          <button className="ml-auto group-data-[collapsible=icon]:hidden text-muted-foreground hover:text-foreground">
+          <button
+            onClick={handleLogout}
+            disabled={logout.isPending}
+            className="ml-auto group-data-[collapsible=icon]:hidden text-muted-foreground hover:text-foreground disabled:opacity-50"
+            title="Cerrar sesión"
+            aria-label="Cerrar sesión"
+          >
             <LogOut className="h-4 w-4" />
           </button>
         </div>
@@ -156,3 +186,4 @@ export function AppSidebar() {
     </Sidebar>
   );
 }
+

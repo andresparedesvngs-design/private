@@ -7,13 +7,20 @@ let socket: Socket | null = null;
 export function getSocket(): Socket {
   if (!socket) {
     socket = io({
-      autoConnect: true,
+      autoConnect: false,
+      withCredentials: true,
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
     });
   }
   return socket;
+}
+
+export function disconnectSocket() {
+  if (socket?.connected) {
+    socket.disconnect();
+  }
 }
 
 export function useSocket() {
@@ -73,6 +80,20 @@ export function useSocket() {
       queryClient.invalidateQueries({ queryKey: ['campaigns'] });
     });
 
+    socket.on('message:created', () => {
+      queryClient.invalidateQueries({ queryKey: ['messages'] });
+      queryClient.invalidateQueries({ queryKey: ['debtors'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+    });
+
+    socket.on('message:received', () => {
+      queryClient.invalidateQueries({ queryKey: ['messages'] });
+      queryClient.invalidateQueries({ queryKey: ['debtors'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+    });
+
+    socket.connect();
+
     return () => {
       socket.off('session:created');
       socket.off('session:updated');
@@ -85,6 +106,10 @@ export function useSocket() {
       socket.off('campaign:paused');
       socket.off('campaign:progress');
       socket.off('campaign:updated');
+      socket.off('message:created');
+      socket.off('message:received');
+
+      socket.disconnect();
     };
   }, [queryClient]);
 }

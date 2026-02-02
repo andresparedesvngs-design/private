@@ -30,12 +30,12 @@ export default function SystemLogs() {
       <div className="flex flex-col gap-6 h-[calc(100vh-140px)]">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-heading font-bold text-foreground">System Logs</h1>
-            <p className="text-muted-foreground mt-1">Real-time server logs and service monitoring.</p>
+            <h1 className="text-3xl font-heading font-bold text-foreground">Registros del sistema</h1>
+            <p className="text-muted-foreground mt-1">Registros en tiempo real del servidor y monitoreo de servicios.</p>
           </div>
           <div className="flex items-center gap-2 text-sm text-green-600 bg-green-500/10 px-3 py-1 rounded-full border border-green-500/20 animate-pulse">
             <span className="w-2 h-2 rounded-full bg-green-500"></span>
-            Live Stream
+            En vivo
           </div>
         </div>
 
@@ -44,7 +44,7 @@ export default function SystemLogs() {
             <div className="h-3 w-3 rounded-full bg-red-500/50" />
             <div className="h-3 w-3 rounded-full bg-yellow-500/50" />
             <div className="h-3 w-3 rounded-full bg-green-500/50" />
-            <span className="ml-2 text-xs text-gray-500">server.log - bash</span>
+            <span className="ml-2 text-xs text-gray-500">server.log - terminal</span>
           </div>
           <ScrollArea className="flex-1 p-4">
             {isLoading ? (
@@ -53,7 +53,7 @@ export default function SystemLogs() {
               </div>
             ) : !logs || logs.length === 0 ? (
               <div className="flex items-center justify-center h-full py-12 text-gray-500">
-                No logs available
+                No hay registros disponibles
               </div>
             ) : (
               <div className="space-y-1">

@@ -7,9 +7,20 @@ import { useLocation } from "wouter";
 export default function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const pathSegments = location.split('/').filter(Boolean);
-  const currentPage = pathSegments.length > 0 
-    ? pathSegments[0].charAt(0).toUpperCase() + pathSegments[0].slice(1) 
-    : 'Dashboard';
+  const pageLabels: Record<string, string> = {
+    sessions: "Sesiones",
+    campaigns: "Campañas",
+    debtors: "Deudores",
+    contacts: "Contactos",
+    messages: "Mensajes",
+    logs: "Registros",
+    settings: "Configuración",
+  };
+  const currentPage =
+    pathSegments.length > 0
+      ? pageLabels[pathSegments[0]] ??
+        (pathSegments[0].charAt(0).toUpperCase() + pathSegments[0].slice(1))
+      : "Panel";
 
   return (
     <SidebarProvider>
@@ -34,7 +45,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <div className="ml-auto flex items-center gap-4">
              <div className="flex items-center gap-2 text-xs text-muted-foreground bg-secondary/50 px-3 py-1.5 rounded-full border border-border/50">
                 <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                System Operational
+                Sistema en funcionamiento
              </div>
           </div>
         </header>
