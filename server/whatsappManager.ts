@@ -25,7 +25,7 @@ if (!clientAny.__injectPatched) {
     "onAppStateHasSyncedEvent",
   ];
 
-  async function cleanupBindings(page: any) {
+  const cleanupBindings = async (page: any) => {
     if (!page || typeof page.removeExposedFunction !== "function") {
       return;
     }
@@ -45,7 +45,7 @@ if (!clientAny.__injectPatched) {
         }
       }
     }
-  }
+  };
 
   if (typeof originalInject === "function") {
     clientAny.prototype.inject = function (...args: any[]) {

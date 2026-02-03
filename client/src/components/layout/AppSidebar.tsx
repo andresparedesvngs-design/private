@@ -69,11 +69,6 @@ const items = [
 
 const systemItems = [
   {
-    title: "Servicio de limpieza",
-    url: "/cleanup",
-    icon: ShieldAlert,
-  },
-  {
     title: "Configuración",
     url: "/settings",
     icon: Settings,

@@ -1388,9 +1388,10 @@ class CampaignEngine {
 
           if (shouldApplyPause) {
             pauseCounter += 1;
+            const durationsMode = pausePlan.durationsMode ?? "list";
             const pauseMs = this.pickPauseDurationMs(
               pausePlan.durationsMinutes,
-              pausePlan.durationsMode
+              durationsMode
             );
             const shouldContinue = await this.cooldownCampaign(
               campaignId,

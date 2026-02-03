@@ -79,7 +79,7 @@ export default function Sessions() {
     setIsQRModalOpen(true);
     void enableSessionQr.mutateAsync({ id: session.id });
 
-    if (["disconnected", "auth_failed", "duplicate"].includes(session.status)) {
+    if (["disconnected", "auth_failed"].includes(session.status)) {
       void handleReconnect(session.id);
     }
   };
@@ -109,7 +109,7 @@ export default function Sessions() {
       }
       const shouldClose =
         qrModalMode === "create"
-          ? ["connected", "auth_failed", "disconnected", "duplicate"].includes(current.status)
+          ? ["connected", "auth_failed", "disconnected"].includes(current.status)
           : current.status === "connected";
       if (shouldClose) {
         setPendingSessionId(null);
@@ -134,7 +134,6 @@ export default function Sessions() {
     initializing: "Inicializando",
     authenticated: "Autenticada",
     reconnecting: "Reconectando",
-    duplicate: "Numero duplicado",
   };
   const displayStatus = (status: string) => sessionStatusLabels[status] ?? status;
 
@@ -146,7 +145,6 @@ export default function Sessions() {
     if (pendingSession.status === "reconnecting") return "Reconectando...";
     if (pendingSession.status === "auth_failed") return "Autenticación fallida. Intenta nuevamente.";
     if (pendingSession.status === "disconnected") return "Sesión desconectada. Generando QR...";
-    if (pendingSession.status === "duplicate") return "Sesión duplicada. Generando QR...";
     return "Inicializando sesion...";
   })();
 
@@ -246,7 +244,7 @@ export default function Sessions() {
                   {sessions.map((session) => {
                     const canShowQr =
                       session.status === "qr_ready" ||
-                      ["disconnected", "auth_failed", "duplicate"].includes(session.status);
+                      ["disconnected", "auth_failed"].includes(session.status);
                     const lastActive = session.lastActive
                       ? new Date(session.lastActive).toLocaleTimeString([], {
                           hour: "2-digit",
@@ -317,7 +315,7 @@ export default function Sessions() {
                               QR
                             </Button>
                           )}
-                          {["disconnected", "auth_failed", "duplicate", "initializing", "authenticated", "qr_ready"].includes(session.status) && (
+                          {["disconnected", "auth_failed", "initializing", "authenticated", "qr_ready"].includes(session.status) && (
                             <Button
                               variant="outline"
                               size="sm"

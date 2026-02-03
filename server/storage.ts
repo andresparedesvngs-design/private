@@ -545,7 +545,7 @@ export class MongoStorage implements IStorage {
 
   async createDebtor(debtor: InsertDebtor): Promise<Debtor> {
     const created = await DebtorModel.create(debtor);
-    const contactPayload = this.buildContactFromDebtor(created);
+    const contactPayload = this.buildContactFromDebtor(this.transformDebtor(created));
     if (contactPayload) {
       await this.upsertContact(contactPayload);
     }
@@ -556,7 +556,7 @@ export class MongoStorage implements IStorage {
     const created = await DebtorModel.insertMany(debtors);
     await Promise.all(
       created.map((debtor) => {
-        const contactPayload = this.buildContactFromDebtor(debtor);
+        const contactPayload = this.buildContactFromDebtor(this.transformDebtor(debtor));
         return contactPayload ? this.upsertContact(contactPayload) : Promise.resolve(null);
       })
     );
@@ -567,7 +567,7 @@ export class MongoStorage implements IStorage {
     if (!mongoose.isValidObjectId(id)) return undefined;
     const updated = await DebtorModel.findByIdAndUpdate(id, data, { new: true });
     if (updated) {
-      const contactPayload = this.buildContactFromDebtor(updated);
+      const contactPayload = this.buildContactFromDebtor(this.transformDebtor(updated));
       if (contactPayload) {
         await this.upsertContact(contactPayload);
       }
@@ -586,7 +586,7 @@ export class MongoStorage implements IStorage {
       const debtors = await DebtorModel.find().select("name phone metadata");
       await Promise.all(
         debtors.map((debtor) => {
-          const contactPayload = this.buildContactFromDebtor(debtor);
+          const contactPayload = this.buildContactFromDebtor(this.transformDebtor(debtor));
           return contactPayload ? this.upsertContact(contactPayload) : Promise.resolve(null);
         })
       );

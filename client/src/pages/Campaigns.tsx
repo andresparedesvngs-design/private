@@ -81,6 +81,7 @@ export default function Campaigns() {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [cooldowns, setCooldowns] = useState<Record<string, { endAt: number; reason?: string }>>({});
   const [cooldownNow, setCooldownNow] = useState(Date.now());
+  const [campaignErrors, setCampaignErrors] = useState<Record<string, { message: string; at: number }>>({});
 
   useEffect(() => {
     if (!location.includes("?new=1")) return;
@@ -109,9 +110,21 @@ export default function Campaigns() {
     };
 
     socket.on("campaign:cooldown", handleCooldown);
+    const handleCampaignError = (payload: any) => {
+      if (!payload?.campaignId || !payload?.error) return;
+      setCampaignErrors((prev) => ({
+        ...prev,
+        [payload.campaignId]: {
+          message: String(payload.error),
+          at: Date.now(),
+        },
+      }));
+    };
+    socket.on("campaign:error", handleCampaignError);
 
     return () => {
       socket.off("campaign:cooldown", handleCooldown);
+      socket.off("campaign:error", handleCampaignError);
     };
   }, []);
 
@@ -510,7 +523,6 @@ export default function Campaigns() {
     active: "Activa",
     paused: "Pausada",
     completed: "Completada",
-    error: "Con error",
   };
   const campaignChannelLabels: Record<string, string> = {
     whatsapp: "WhatsApp",
@@ -1431,6 +1443,7 @@ export default function Campaigns() {
               </div>
             ) : campaigns?.map((campaign) => {
               const cooldown = cooldowns[campaign.id];
+              const campaignError = campaignErrors[campaign.id];
               const remainingMs = cooldown ? cooldown.endAt - cooldownNow : 0;
               const showCooldown = remainingMs > 0 && campaign.status === "active";
               const cooldownLabel =
@@ -1454,6 +1467,15 @@ export default function Campaigns() {
                         }>
                           {displayCampaignStatus(campaign.status)}
                         </Badge>
+                        {campaignError?.message && (
+                          <Badge
+                            variant="outline"
+                            title={campaignError.message}
+                            className="border-red-200 bg-red-50 text-red-700"
+                          >
+                            Error
+                          </Badge>
+                        )}
                         {showCooldown && (
                           <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-700">
                             {cooldownLabel} {formatCooldown(remainingMs)}

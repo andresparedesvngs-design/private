@@ -10,6 +10,7 @@
 - Monorepo con tres bloques: `server/` (Express + Socket.IO), `client/` (React + Vite) y `shared/` (Zod + Mongoose + tipos compartidos). Ver `server/index.ts`, `client/src/App.tsx`, `shared/schema.ts`.
 - **Backend**: Node.js + TypeScript, Express, Socket.IO, Mongoose/MongoDB, Passport Local, whatsapp-web.js y sistema de campañas. Ver `server/index.ts`, `server/routes.ts`, `server/campaignEngine.ts`, `server/storage.ts`, `server/whatsappManager.ts`, `server/smsManager.ts`.
 - **Frontend**: React + Vite, wouter, TanStack React Query, shadcn/ui, sockets para tiempo real. Ver `client/src/App.tsx`, `client/src/lib/api.ts`, `client/src/lib/socket.ts`.
+- **Frontend/UI (rutas expuestas)**: Panel, Sesiones, Campañas, Mensajes, Deudores, Contactos, Registros y Configuración. No hay ruta `/cleanup` en el router ni opción de menú. Ver `client/src/components/layout/AppSidebar.tsx`, `client/src/App.tsx`.
 - **Base de datos**: MongoDB vía Mongoose (`server/db.ts`, `shared/schema.ts`).
 - **Tiempo real**: Socket.IO se usa para eventos de sesiones, campañas y mensajes (`server/routes.ts`, `server/whatsappManager.ts`, `server/campaignEngine.ts`).
 
@@ -30,7 +31,6 @@
 ### 4.1 Session (WhatsApp)
 - Campos: `phoneNumber`, `status`, `qrCode`, `battery`, `messagesSent`, `lastActive`, timestamps. Ver `shared/schema.ts`.
 - Estados observados en backend/UI: `initializing`, `qr_ready`, `authenticated`, `connected`, `reconnecting`, `auth_failed`, `disconnected`. Ver `server/whatsappManager.ts`, `client/src/pages/Sessions.tsx`.
-- El UI menciona `duplicate` pero **no hay escritura explícita** de ese estado en backend → **UNKNOWN** si se usa en runtime. Ver `client/src/pages/Sessions.tsx`, `server/whatsappManager.ts`.
 
 ### 4.2 Pool (WhatsApp routing)
 - Campos: `name`, `strategy`, `delayBase`, `delayVariation`, `sessionIds`, `active`. Ver `shared/schema.ts`.
@@ -48,7 +48,7 @@
 - Campos: `name`, `message`, `messageVariants`, `messageRotationStrategy`, `channel`, `smsPoolId`, `fallbackSms`, `status`, `poolId`, `debtorRangeStart`, `debtorRangeEnd`, `totalDebtors`, `sent`, `failed`, `progress`, `startedAt`, `completedAt`. Ver `shared/schema.ts`.
 - Canales reales: `whatsapp`, `sms`, `whatsapp_fallback_sms` (más `fallbackSms` boolean). Ver `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
 - Estados usados por backend: `draft`, `active`, `paused`, `completed`. Ver `server/routes.ts`, `server/campaignEngine.ts`.
-- El UI muestra estado `error`, pero el backend **no** asigna `status="error"`; sólo emite evento `campaign:error`. Ver `client/src/pages/Campaigns.tsx`, `server/campaignEngine.ts` → **MISMATCH**.
+- El backend **no** asigna `status="error"`; los errores de campaña se comunican vía evento `campaign:error`. La UI muestra un badge/tooltip usando ese evento, sin inventar estados nuevos. Ver `client/src/pages/Campaigns.tsx`, `server/campaignEngine.ts`.
 
 ### 4.6 Debtor (deudor/contacto de campaña)
 - Campos: `campaignId`, `name`, `phone`, `debt`, `status`, `lastContact`, `metadata`. Ver `shared/schema.ts`.
@@ -153,7 +153,7 @@
 ## 7. Eventos Socket.IO (emisores reales)
 
 - Sesiones: `session:created`, `session:updated`, `session:deleted`, `session:qr`, `session:ready`, `session:auth_failed`, `session:disconnected`, `session:reconnecting`. Ver `server/routes.ts`, `server/whatsappManager.ts`.
-- Campañas: `campaign:started`, `campaign:paused`, `campaign:updated`, `campaign:progress`, `campaign:error`, `campaign:cooldown`. Ver `server/routes.ts`, `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
+- Campañas: `campaign:started`, `campaign:paused`, `campaign:updated`, `campaign:progress`, `campaign:error`, `campaign:cooldown`. La UI usa `campaign:error` para mostrar badge/tooltip de error, sin estado `status="error"`. Ver `server/routes.ts`, `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
 - Mensajes: `message:created`, `message:received`. Ver `server/campaignEngine.ts`, `server/whatsappManager.ts`.
 
 ## 8. Invariantes operativas (no romper)
@@ -169,14 +169,14 @@
 - Variables definidas en `server/*`, `script/*` y `vite-plugin-meta-images.ts`. Ver RUNBOOK.md para el listado completo.
 - El archivo `.env` contiene valores locales **sensibles**; no se deben copiar en documentación pública.
 
+## 9.1 Assets
+
+- El favicon configurado en `client/index.html` apunta a `/favicon.png` (no SVG). Ver `client/index.html`.
+
 ## 10. Desalineaciones / UNKNOWN (hechos observables)
 
 - `replit.md` describe PostgreSQL/Drizzle, pero el código usa MongoDB/Mongoose (`server/db.ts`, `shared/schema.ts`). Tratar `replit.md` como **posiblemente obsoleto**.
-- La UI muestra ruta “Servicio de limpieza” (`/cleanup`) en el sidebar, pero no hay ruta en `client/src/App.tsx` → 404. Ver `client/src/components/layout/AppSidebar.tsx`, `client/src/App.tsx`.
-- Estado de sesión `duplicate` aparece en UI pero no se setea en backend. **UNKNOWN** si se usa en runtime. Ver `client/src/pages/Sessions.tsx`, `server/whatsappManager.ts`.
-- Estado de campaña `error` existe en UI, pero backend no lo asigna (solo emite `campaign:error`). Ver `client/src/pages/Campaigns.tsx`, `server/campaignEngine.ts`.
 - `multer` se inicializa en `server/routes.ts` pero no hay endpoints de upload → **posible código muerto**.
 - `components.json` referencia `tailwind.config.ts`, pero ese archivo no existe en el repo → **UNKNOWN**.
-- `client/index.html` referencia `favicon.svg`, pero `client/public` tiene `favicon.png` → **mismatch**.
 - `script/build.ts` incluye dependencias en allowlist que no aparecen en `package.json` (drizzle, stripe, openai, etc.) → **posible legado**.
 - Infraestructura CI/CD, Docker, despliegue fuera de Replit: **UNKNOWN**.
