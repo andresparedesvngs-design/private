@@ -15,9 +15,6 @@ import {
   insertContactSchema,
 } from "@shared/schema";
 import { z } from "zod";
-import multer from "multer";
-
-const upload = multer({ dest: 'uploads/' });
 
 export async function registerRoutes(
   httpServer: Server,

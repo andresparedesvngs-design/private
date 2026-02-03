@@ -30,6 +30,15 @@
 2) `npm start` → `node dist/index.cjs`.
 3) El servidor sirve estáticos desde `dist/public` (`server/static.ts`).
 
+## Scripts útiles
+
+- `npm run dev` — backend + frontend en un solo proceso (Vite middleware).
+- `npm run dev:client` — solo frontend (Vite).
+- `npm run check` — TypeScript (`tsc`).
+- `npm test` — Vitest.
+- `npm run build` — build full (client + server).
+- `npm start` — sirve build de producción.
+
 ## Variables de entorno (confirmadas en código)
 
 ### Core / Server

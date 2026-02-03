@@ -175,8 +175,5 @@
 
 ## 10. Desalineaciones / UNKNOWN (hechos observables)
 
-- `replit.md` describe PostgreSQL/Drizzle, pero el código usa MongoDB/Mongoose (`server/db.ts`, `shared/schema.ts`). Tratar `replit.md` como **posiblemente obsoleto**.
-- `multer` se inicializa en `server/routes.ts` pero no hay endpoints de upload → **posible código muerto**.
 - `components.json` referencia `tailwind.config.ts`, pero ese archivo no existe en el repo → **UNKNOWN**.
-- `script/build.ts` incluye dependencias en allowlist que no aparecen en `package.json` (drizzle, stripe, openai, etc.) → **posible legado**.
 - Infraestructura CI/CD, Docker, despliegue fuera de Replit: **UNKNOWN**.
