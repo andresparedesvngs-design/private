@@ -24,10 +24,11 @@ export async function registerRoutes(
   app: Express,
   sessionMiddleware: RequestHandler
 ): Promise<Server> {
+  const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:5000";
   
   const io = new SocketServer(httpServer, {
     cors: {
-      origin: "http://localhost:5000",
+      origin: CORS_ORIGIN,
       methods: ["GET", "POST"],
       credentials: true
     }

@@ -1,112 +1,182 @@
-# AI Context for "rest-express" Project
+﻿# AI_CONTEXT — WhatsMassive (rest-express)
 
-## 1. Project Overview
+## 0. Alcance y fuente de verdad
 
-This is a full-stack web application designed as a marketing and communication automation platform. Its core functionality revolves around managing contacts, creating and running campaigns, and sending messages via WhatsApp and SMS. The application provides a web-based UI for users to manage these activities.
+- **Fuente de verdad**: el código del repositorio. La documentación interna (por ejemplo `replit.md`) puede estar desactualizada y debe validarse contra el código.
+- **No asumir**: si algo no está explícitamente en el código, marcarlo como **UNKNOWN**.
 
-The project is structured as a monorepo with two main parts:
-- A **React frontend** located in the `client` directory.
-- A **Node.js/Express backend** located in the `server` directory.
+## 1. Arquitectura real (backend + frontend)
 
-## 2. Technologies, Languages, and Frameworks
+- Monorepo con tres bloques: `server/` (Express + Socket.IO), `client/` (React + Vite) y `shared/` (Zod + Mongoose + tipos compartidos). Ver `server/index.ts`, `client/src/App.tsx`, `shared/schema.ts`.
+- **Backend**: Node.js + TypeScript, Express, Socket.IO, Mongoose/MongoDB, Passport Local, whatsapp-web.js y sistema de campañas. Ver `server/index.ts`, `server/routes.ts`, `server/campaignEngine.ts`, `server/storage.ts`, `server/whatsappManager.ts`, `server/smsManager.ts`.
+- **Frontend**: React + Vite, wouter, TanStack React Query, shadcn/ui, sockets para tiempo real. Ver `client/src/App.tsx`, `client/src/lib/api.ts`, `client/src/lib/socket.ts`.
+- **Base de datos**: MongoDB vía Mongoose (`server/db.ts`, `shared/schema.ts`).
+- **Tiempo real**: Socket.IO se usa para eventos de sesiones, campañas y mensajes (`server/routes.ts`, `server/whatsappManager.ts`, `server/campaignEngine.ts`).
 
-### Backend
-- **Language:** TypeScript
-- **Framework:** Express.js
-- **Database:** MongoDB (using Mongoose as the ODM)
-- **Real-time Communication:** Socket.IO
-- **Authentication:** Passport.js for session-based authentication.
-- **Messaging:**
-  - `whatsapp-web.js`: For interacting with WhatsApp, likely for sending messages and managing a WhatsApp bot. This uses Puppeteer for browser automation.
-  - An `smsManager.ts` module suggests SMS sending capabilities, although the specific provider is not immediately clear.
-- **File Handling:** `multer` for file uploads and `xlsx` for parsing Excel files (likely for importing contacts).
-- **Runtime:** `tsx` for running TypeScript in development and `node` for production.
+## 2. Ejecución del sistema (visión operativa)
 
-### Frontend
-- **Language:** TypeScript
-- **Framework:** React
-- **Build Tool:** Vite
-- **Routing:** `wouter`
-- **Styling:** Tailwind CSS with a UI component library based on `shadcn/ui` and `@radix-ui`.
-- **Data Fetching & State Management:** `@tanstack/react-query` for server state management and `socket.io-client` for real-time updates.
-- **UI Components:** A rich set of custom components is available in `client/src/components/ui`.
+- `server/index.ts` crea el servidor Express y registra middleware, auth y rutas; en dev integra Vite con `server/vite.ts`, y en prod sirve estáticos con `server/static.ts`.
+- El servidor escucha en **localhost** con el puerto `PORT` (por defecto 5000). Ver `server/index.ts`.
+- El frontend se sirve desde el mismo servidor en desarrollo (Vite middleware) y desde `dist/public` en producción. Ver `server/vite.ts`, `server/static.ts`.
 
-### Shared
-- **Data Validation:** `zod` is used for schema definition and validation, with schemas shared between the frontend and backend in the `shared/schema.ts` file.
+## 3. Autenticación y control de acceso
 
-## 3. Architecture and Structure
+- Auth local vía `passport-local` y sesiones en memoria (`memorystore`), cookie `wm.sid`. Ver `server/auth.ts`.
+- Las rutas `/api/auth/*` se registran antes del middleware global; el resto de `/api/*` está protegido por `ensureAuthenticated`. Ver `server/index.ts` y `server/auth.ts`.
+- Socket.IO aplica middleware de sesión y rechaza conexiones sin sesión válida. Ver `server/auth.ts` y `server/routes.ts`.
 
-### Backend (`server/`)
-- **`index.ts`**: The main entry point for the Express server.
-- **`routes.ts`**: Defines all API endpoints.
-- **`db.ts`**: Manages the connection to the MongoDB database.
-- **`auth.ts`**: Handles user authentication logic using Passport.js.
-- **`whatsappManager.ts`**: A critical module that encapsulates the logic for interacting with WhatsApp.
-- **`smsManager.ts`**: Manages SMS sending functionality.
-- **`campaignEngine.ts`**: Contains the core logic for executing marketing/communication campaigns.
-- **`storage.ts`**: Handles file storage for uploads.
-- **`vite.ts` / `static.ts`**: Serve the Vite development server and static frontend assets, respectively.
+## 4. Contratos de dominio (fuente: shared/schema.ts)
 
-### Frontend (`client/`)
-- **`src/main.tsx`**: The entry point for the React application.
-- **`src/App.tsx`**: The root component, which likely sets up routing and global providers.
-- **`src/pages/`**: Contains the main views of the application, such as `Dashboard.tsx`, `Campaigns.tsx`, `Contacts.tsx`, etc.
-- **`src/components/`**: Contains reusable UI components, including a large set of `shadcn/ui`-style components in the `ui` subdirectory.
-- **`src/lib/`**: Contains utility functions, the API client (`api.ts`), the Socket.IO client (`socket.ts`), and the React Query client (`queryClient.ts`).
-- **`src/hooks/`**: Contains custom React hooks.
+### 4.1 Session (WhatsApp)
+- Campos: `phoneNumber`, `status`, `qrCode`, `battery`, `messagesSent`, `lastActive`, timestamps. Ver `shared/schema.ts`.
+- Estados observados en backend/UI: `initializing`, `qr_ready`, `authenticated`, `connected`, `reconnecting`, `auth_failed`, `disconnected`. Ver `server/whatsappManager.ts`, `client/src/pages/Sessions.tsx`.
+- El UI menciona `duplicate` pero **no hay escritura explícita** de ese estado en backend → **UNKNOWN** si se usa en runtime. Ver `client/src/pages/Sessions.tsx`, `server/whatsappManager.ts`.
 
-## 4. Main System Flows
+### 4.2 Pool (WhatsApp routing)
+- Campos: `name`, `strategy`, `delayBase`, `delayVariation`, `sessionIds`, `active`. Ver `shared/schema.ts`.
+- Estrategias usadas en UI/API: `competitive`, `fixed_turns`, `random_turns` (strings libres; no enum formal). Ver `client/src/pages/Campaigns.tsx`, `server/routes.ts`.
 
-1.  **Authentication Flow**:
-    - The user logs in via a form on the `Login.tsx` page.
-    - The server's `auth.ts` module, using Passport.js, validates the credentials against the database.
-    - A session is created for the user.
-    - The frontend receives a success response and navigates the user to the main dashboard.
+### 4.3 GsmLine (SMS line)
+- Campos: `name`, `urlTemplate`, `status`, `active`, `lastUsedAt`. Ver `shared/schema.ts`.
+- `urlTemplate` define proveedor (Infobip, SMS Gate o HTTP genérico). Ver `server/smsManager.ts`.
 
-2.  **Campaign Execution Flow**:
-    - A user creates a campaign through the UI (likely in `Campaigns.tsx`).
-    - The campaign details are sent to the backend and saved in the database.
-    - The `campaignEngine.ts` is triggered to start the campaign.
-    - The engine iterates through the campaign's contacts and uses `whatsappManager.ts` and/or `smsManager.ts` to send messages.
-    - The status of the campaign and individual messages is updated in the database and communicated to the frontend in real-time via Socket.IO.
+### 4.4 GsmPool (SMS routing)
+- Campos: `name`, `strategy`, `delayBase`, `delayVariation`, `lineIds`, `active`. Ver `shared/schema.ts`.
+- Estrategias usadas: `fixed_turns`, `random_turns`. Ver `client/src/pages/Campaigns.tsx`.
 
-3.  **Real-time Updates Flow**:
-    - The frontend establishes a WebSocket connection to the server using Socket.IO.
-    - When events occur on the server (e.g., a new message is received, a WhatsApp session is established, campaign progress updates), the server emits events via Socket.IO.
-    - The frontend listens for these events and updates the UI accordingly, providing a real-time experience.
+### 4.5 Campaign
+- Campos: `name`, `message`, `messageVariants`, `messageRotationStrategy`, `channel`, `smsPoolId`, `fallbackSms`, `status`, `poolId`, `debtorRangeStart`, `debtorRangeEnd`, `totalDebtors`, `sent`, `failed`, `progress`, `startedAt`, `completedAt`. Ver `shared/schema.ts`.
+- Canales reales: `whatsapp`, `sms`, `whatsapp_fallback_sms` (más `fallbackSms` boolean). Ver `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
+- Estados usados por backend: `draft`, `active`, `paused`, `completed`. Ver `server/routes.ts`, `server/campaignEngine.ts`.
+- El UI muestra estado `error`, pero el backend **no** asigna `status="error"`; sólo emite evento `campaign:error`. Ver `client/src/pages/Campaigns.tsx`, `server/campaignEngine.ts` → **MISMATCH**.
 
-## 5. Important Considerations
+### 4.6 Debtor (deudor/contacto de campaña)
+- Campos: `campaignId`, `name`, `phone`, `debt`, `status`, `lastContact`, `metadata`. Ver `shared/schema.ts`.
+- Estados reales: `disponible`, `procesando`, `completado`, `fallado`. Ver `server/campaignEngine.ts`, `client/src/pages/Debtors.tsx`.
+- `metadata` guarda campos dinámicos (ej. ejecutivo). Ver `client/src/pages/Debtors.tsx`, `client/src/pages/Messages.tsx`.
 
-- **WhatsApp Integration**: The `whatsapp-web.js` library is a key part of this application. It works by automating a real WhatsApp Web session in the background. This can be brittle and may require careful handling of authentication, session management, and potential blocking by WhatsApp. The `whatsappManager.ts` is the central place for this logic.
-- **Monorepo Structure**: The separation between `client` and `server` is clear, but they share schemas via the `shared` directory. When making changes to data structures, always update the Zod schemas in `shared/schema.ts` to maintain consistency.
-- **UI Components**: The project uses a rich set of pre-built UI components in `client/src/components/ui`. Before creating a new component, check if one already exists.
-- **Environment Variables**: The application likely uses a `.env` file (as suggested by the `dotenv` package) to manage configuration for the database, session secrets, and other sensitive information. This file is not checked into version control.
-- **Scripts**: The `script/` directory contains useful scripts for building the project (`build.ts`) and for testing specific functionalities (`sendSmsTest.ts`, `runCampaignTests.ts`).
+### 4.7 Contact
+- Campos: `name`, `phone`, `phoneNormalized`, `rut`, `executiveName`, `executivePhone`, `executiveRut`, `metadata`. Ver `shared/schema.ts`.
+- Se edita desde UI y se actualiza vía PATCH. Ver `client/src/pages/Contacts.tsx`, `server/routes.ts`.
 
-## 6. Key Issues and Recommendations for AI
+### 4.8 Message
+- Campos: `campaignId`, `debtorId`, `sessionId`, `phone`, `content`, `templateUsed`, `templateVariantIndex`, `channel`, `providerResponse`, `status`, `sentAt`, `deliveredAt`, `readAt`, `archived`, `error`. Ver `shared/schema.ts`.
+- Estados reales usados en código: `pending`, `sent`, `failed`, `received`. `delivered` existe en esquema pero no se asigna en backend → **UNKNOWN**. Ver `server/whatsappManager.ts`, `server/campaignEngine.ts`.
 
-This section summarizes the findings of a code review and provides guidance for future modifications.
+### 4.9 SystemLog
+- Campos: `level`, `source`, `message`, `metadata`. Ver `shared/schema.ts`.
+- Se usa para auditoría y observabilidad en UI. Ver `server/storage.ts`, `client/src/pages/SystemLogs.tsx`.
 
-### Critical Issues
-- **Mass Assignment Vulnerability:**
-  - **Location:** Multiple `PATCH` endpoints in `server/routes.ts`.
-  - **Problem:** `req.body` is passed directly to the database update functions, allowing attackers to modify any field.
-  - **Action:** **Always validate `req.body` for any `PATCH` request using a Zod schema (`.partial()`)** that only includes fields the user is allowed to change. Do not pass the raw body to the storage layer.
+## 5. Flujos end-to-end (UI → API → DB/Sockets)
 
-- **Hardcoded CORS Origin:**
-  - **Location:** `server/routes.ts` in the `SocketServer` configuration.
-  - **Problem:** The `origin` is hardcoded to `http://localhost:5000`, which will fail in production.
-  - **Action:** The CORS origin must be loaded from environment variables (e.g., `process.env.CORS_ORIGIN`).
+### 5.1 Login
+- UI `AuthGate` consulta `/api/auth/me`; si 401, muestra `Login.tsx`. Ver `client/src/components/auth/AuthGate.tsx`, `client/src/pages/Login.tsx`, `server/auth.ts`.
 
-### Medium & Minor Issues to Address
-- **Inconsistent Error Handling:**
-  - **Problem:** `try...catch` blocks are duplicated in every route handler, and error messages can leak internal details.
-  - **Action:** When adding new routes, use a centralized async error handling wrapper that passes errors to the global error handler in `index.ts`. Avoid sending raw `error.message` to the client.
+### 5.2 Sesiones WhatsApp
+- Crear sesión: UI → POST `/api/sessions` → `storage.createSession` + `whatsappManager.createSession`, luego QR vía `/api/sessions/:id/qr`. Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
+- QR manual: `WHATSAPP_QR_MANUAL` + ventana QR (`WHATSAPP_QR_WINDOW_MS`). Ver `server/whatsappManager.ts`.
+- Reconnect / reset auth: UI usa `/api/sessions/:id/reconnect` y `/api/sessions/:id/reset-auth`. Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
 
-- **Lack of Automated Tests:**
-  - **Problem:** The project lacks a testing framework and test cases.
-  - **Action:** When adding new features or fixing bugs, create corresponding unit or integration tests using a framework like `vitest` or `jest`.
+### 5.3 Campañas
+- Crear campaña: UI → POST `/api/campaigns` (Zod). Ver `client/src/pages/Campaigns.tsx`, `server/routes.ts`.
+- Iniciar: UI → POST `/api/campaigns/:id/start`; backend `campaignEngine.startCampaign` valida pools, canales y sesiones/lines; cambia estado a `active` y envía progreso. Ver `server/routes.ts`, `server/campaignEngine.ts`.
+- Pausar: UI → POST `/api/campaigns/:id/pause`; backend detiene campaña y marca `paused`. Ver `server/routes.ts`, `server/campaignEngine.ts`.
+- Retry fallidos: UI → POST `/api/campaigns/:id/retry-failed` que resetea deudores `fallado` a `disponible`. Ver `server/routes.ts`.
 
-- **Verbose Logging:**
-  - **Problem:** The default logging configuration can log sensitive request/response bodies.
-  - **Action:** Ensure that logging of sensitive information is disabled in production environments. Use the centralized logger instead of `console.log`.
+### 5.4 Envíos (WhatsApp y SMS)
+- WhatsApp: `campaignEngine` usa `whatsappManager.sendMessage`, registra `Message` con status `sent` o `failed`. Ver `server/campaignEngine.ts`, `server/whatsappManager.ts`.
+- SMS: `smsManager.sendSmsWithLine` con `urlTemplate` (Infobip/SMS Gate/HTTP genérico). Ver `server/smsManager.ts`.
+- Fallback: canal `whatsapp_fallback_sms` o `fallbackSms=true` habilitan SMS si WhatsApp falla. Ver `server/campaignEngine.ts`.
+
+### 5.5 Mensajes entrantes
+- `whatsappManager` guarda mensajes entrantes como `Message.status="received"` y actualiza `Debtor.lastContact`. Emite `message:received`. Ver `server/whatsappManager.ts`.
+
+### 5.6 Deudores
+- Importación CSV/XLSX: cliente parsea y envía `/api/debtors/bulk`; backend valida con Zod y guarda en Mongo. Ver `client/src/pages/Debtors.tsx`, `server/routes.ts`.
+- Limpieza, reset y liberación: `/api/debtors/cleanup`, `/api/debtors/reset`, `/api/debtors/release`. Ver `server/routes.ts`, `server/storage.ts`.
+
+### 5.7 Mensajería UI
+- UI agrupa conversaciones por teléfono, permite archivar, marcar leído y eliminar. Endpoints: `/api/messages/conversation/*`. Ver `client/src/pages/Messages.tsx`, `server/routes.ts`, `server/storage.ts`.
+
+### 5.8 Settings
+- Polling WhatsApp: `/api/settings/whatsapp-polling`. Ver `client/src/pages/Settings.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
+- Ventana horaria: `/api/settings/campaign-window` (overrides). Ver `client/src/pages/Settings.tsx`, `server/routes.ts`, `server/campaignEngine.ts`.
+- Pausas en campañas: `/api/settings/campaign-pauses`. Ver `client/src/pages/Settings.tsx`, `server/routes.ts`, `server/campaignEngine.ts`.
+
+## 6. API HTTP (contratos reales)
+
+### Auth
+- `GET /api/auth/me`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+
+### Dashboard
+- `GET /api/dashboard/stats`
+
+### Sessions
+- `GET /api/sessions`, `GET /api/sessions/:id`, `POST /api/sessions`, `PATCH /api/sessions/:id`, `DELETE /api/sessions/:id`
+- `POST /api/sessions/:id/reconnect`, `POST /api/sessions/:id/reset-auth`, `POST /api/sessions/:id/qr`
+- `POST /api/sessions/:id/send` (envío manual)
+
+### Pools (WhatsApp)
+- `GET /api/pools`, `GET /api/pools/:id`, `POST /api/pools`, `PATCH /api/pools/:id`, `DELETE /api/pools/:id`
+
+### GSM Lines / Pools (SMS)
+- `GET /api/gsm-lines`, `GET /api/gsm-lines/:id`, `POST /api/gsm-lines`, `PATCH /api/gsm-lines/:id`, `DELETE /api/gsm-lines/:id`
+- `GET /api/gsm-pools`, `GET /api/gsm-pools/:id`, `POST /api/gsm-pools`, `PATCH /api/gsm-pools/:id`, `DELETE /api/gsm-pools/:id`
+
+### Campaigns
+- `GET /api/campaigns`, `GET /api/campaigns/:id`, `POST /api/campaigns`, `PATCH /api/campaigns/:id`, `DELETE /api/campaigns/:id`
+- `POST /api/campaigns/:id/start`, `POST /api/campaigns/:id/pause`, `POST /api/campaigns/:id/retry-failed`
+
+### Debtors
+- `GET /api/debtors`, `GET /api/debtors/:id`, `POST /api/debtors`, `POST /api/debtors/bulk`, `PATCH /api/debtors/:id`, `DELETE /api/debtors/:id`
+- `POST /api/debtors/reset`, `POST /api/debtors/cleanup`, `POST /api/debtors/release`
+
+### Contacts
+- `GET /api/contacts`, `PATCH /api/contacts/:id`
+
+### Messages
+- `GET /api/messages`
+- `PATCH /api/messages/conversation/read`
+- `PATCH /api/messages/conversation/archive`
+- `POST /api/messages/conversation/delete`
+
+### Logs
+- `GET /api/logs`
+
+### Settings
+- `GET/POST /api/settings/whatsapp-polling`
+- `GET/POST /api/settings/campaign-window`
+- `GET/POST /api/settings/campaign-pauses`
+
+## 7. Eventos Socket.IO (emisores reales)
+
+- Sesiones: `session:created`, `session:updated`, `session:deleted`, `session:qr`, `session:ready`, `session:auth_failed`, `session:disconnected`, `session:reconnecting`. Ver `server/routes.ts`, `server/whatsappManager.ts`.
+- Campañas: `campaign:started`, `campaign:paused`, `campaign:updated`, `campaign:progress`, `campaign:error`, `campaign:cooldown`. Ver `server/routes.ts`, `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
+- Mensajes: `message:created`, `message:received`. Ver `server/campaignEngine.ts`, `server/whatsappManager.ts`.
+
+## 8. Invariantes operativas (no romper)
+
+- **Campañas**: WhatsApp requiere `poolId` con sesiones asignadas; SMS requiere `smsPoolId` con líneas activas. Si no se cumplen, la campaña se pausa o falla. Ver `server/campaignEngine.ts`.
+- **Estados de deudores**: el motor cambia `disponible → procesando → completado|fallado`. UI y reportes dependen de estos estados. Ver `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
+- **Templates**: `campaign.message` es obligatorio y se complementa con `messageVariants`. Tokens `{nombre}`, `{deuda}`, `{phone}`, y metadata `{<key>}` se reemplazan. Ver `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
+- **Storage**: `storage` transforma `_id` a `id` y tipos Date; no saltarse esta capa si se cambia persistencia. Ver `server/storage.ts`.
+- **Sockets**: la UI depende de eventos para refrescar queries. Ver `client/src/lib/socket.ts`.
+
+## 9. Configuración (env) — ver RUNBOOK.md
+
+- Variables definidas en `server/*`, `script/*` y `vite-plugin-meta-images.ts`. Ver RUNBOOK.md para el listado completo.
+- El archivo `.env` contiene valores locales **sensibles**; no se deben copiar en documentación pública.
+
+## 10. Desalineaciones / UNKNOWN (hechos observables)
+
+- `replit.md` describe PostgreSQL/Drizzle, pero el código usa MongoDB/Mongoose (`server/db.ts`, `shared/schema.ts`). Tratar `replit.md` como **posiblemente obsoleto**.
+- La UI muestra ruta “Servicio de limpieza” (`/cleanup`) en el sidebar, pero no hay ruta en `client/src/App.tsx` → 404. Ver `client/src/components/layout/AppSidebar.tsx`, `client/src/App.tsx`.
+- Estado de sesión `duplicate` aparece en UI pero no se setea en backend. **UNKNOWN** si se usa en runtime. Ver `client/src/pages/Sessions.tsx`, `server/whatsappManager.ts`.
+- Estado de campaña `error` existe en UI, pero backend no lo asigna (solo emite `campaign:error`). Ver `client/src/pages/Campaigns.tsx`, `server/campaignEngine.ts`.
+- `multer` se inicializa en `server/routes.ts` pero no hay endpoints de upload → **posible código muerto**.
+- `components.json` referencia `tailwind.config.ts`, pero ese archivo no existe en el repo → **UNKNOWN**.
+- `client/index.html` referencia `favicon.svg`, pero `client/public` tiene `favicon.png` → **mismatch**.
+- `script/build.ts` incluye dependencias en allowlist que no aparecen en `package.json` (drizzle, stripe, openai, etc.) → **posible legado**.
+- Infraestructura CI/CD, Docker, despliegue fuera de Replit: **UNKNOWN**.
