@@ -8,6 +8,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { connectDatabase } from "./db";
 import { setupAuth } from "./auth";
+import { registerHealthRoute } from "./health";
 
 initFileLogging();
 
@@ -127,6 +128,8 @@ app.use((req, res, next) => {
 (async () => {
   await connectDatabase();
   const { sessionMiddleware, ensureAuthenticated } = setupAuth(app);
+
+  registerHealthRoute(app);
 
   // Protect all API routes except the auth routes defined in setupAuth.
   app.use("/api", ensureAuthenticated);

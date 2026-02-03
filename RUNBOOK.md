@@ -36,6 +36,7 @@
 - `npm run dev:client` — solo frontend (Vite).
 - `npm run check` — TypeScript (`tsc`).
 - `npm test` — Vitest.
+- `npm test -- --run` — Vitest en modo CI (sin watch).
 - `npm run build` — build full (client + server).
 - `npm start` — sirve build de producción.
 

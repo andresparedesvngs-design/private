@@ -23,7 +23,7 @@
 ## 3. Autenticación y control de acceso
 
 - Auth local vía `passport-local` y sesiones en memoria (`memorystore`), cookie `wm.sid`. Ver `server/auth.ts`.
-- Las rutas `/api/auth/*` se registran antes del middleware global; el resto de `/api/*` está protegido por `ensureAuthenticated`. Ver `server/index.ts` y `server/auth.ts`.
+- Las rutas `/api/auth/*` y `/api/health` se registran antes del middleware global; el resto de `/api/*` está protegido por `ensureAuthenticated`. Ver `server/index.ts` y `server/auth.ts`.
 - Socket.IO aplica middleware de sesión y rechaza conexiones sin sesión válida. Ver `server/auth.ts` y `server/routes.ts`.
 
 ## 4. Contratos de dominio (fuente: shared/schema.ts)
@@ -109,6 +109,9 @@
 - `GET /api/auth/me`
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
+
+### Health
+- `GET /api/health`
 
 ### Dashboard
 - `GET /api/dashboard/stats`

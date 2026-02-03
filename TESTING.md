@@ -3,11 +3,18 @@
 ## Tests existentes (confirmados en código)
 
 - **Vitest** configurado en `vitest.config.ts`.
-- **Único test actual**: `server/smsManager.test.ts` (normalización de números en `SmsManager`).
+- **Unitarios**:
+  - `server/smsManager.test.ts` (normalización de números en `SmsManager`).
+  - `server/campaignEngine.helpers.test.ts` (selección de templates).
+  - `server/whatsappManager.normalizePhoneForWhatsapp.test.ts` (normalización de teléfonos).
+  - `client/src/lib/utils.test.ts` (helpers de ObjectId).
+- **Integración ligera**:
+  - `server/health.test.ts` (GET `/api/health` en Express, sin DB).
 
 ### Cómo correrlos
 
 - `npm test`
+- `npm test -- --run` (modo CI, sin watch)
 
 ## Scripts de verificación manual (no son tests automáticos)
 
@@ -18,8 +25,8 @@
 
 ## Cobertura faltante (hechos observables)
 
-- No hay tests de frontend (React) en el repo.
-- No hay tests de integración para rutas Express, `campaignEngine`, `storage` o `whatsappManager`.
+- No hay tests de frontend (React) de render en el repo.
+- Solo hay integración para `/api/health`; no hay tests de rutas Express críticas ni de `storage`/`campaignEngine` end-to-end.
 - No hay fixtures ni mocks para WhatsApp Web; ese flujo es **UNKNOWN** en automatización.
 
 ## Plan mínimo realista (sin inventar infraestructura)
