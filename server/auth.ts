@@ -4,10 +4,21 @@ import createMemoryStore from "memorystore";
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import type { Server as SocketServer } from "socket.io";
+import bcrypt from "bcryptjs";
+import { storage } from "./storage";
+import type { User } from "@shared/schema";
 
 export interface AuthUser {
+  id: string;
   username: string;
-  role: "admin";
+  role: "admin" | "supervisor" | "executive";
+  displayName?: string | null;
+  executivePhone?: string | null;
+  permissions: string[];
+  notifyEnabled: boolean;
+  notifyBatchWindowSec: number;
+  notifyBatchMaxItems: number;
+  legacy?: boolean;
 }
 
 const SESSION_COOKIE_NAME = "wm.sid";
@@ -34,6 +45,85 @@ function getSessionSecret() {
     );
   }
   return secret;
+}
+
+export async function createAdminIfMissing(): Promise<void> {
+  const adminCount = await storage.getActiveAdminCount();
+  if (adminCount > 0) {
+    return;
+  }
+
+  const { username: rawUsername, password } = getAdminCredentials();
+  const username = rawUsername.trim().toLowerCase();
+
+  if (!username || !password) {
+    console.warn("[auth] ADMIN_USERNAME/ADMIN_PASSWORD missing; cannot bootstrap admin.");
+    return;
+  }
+
+  const existing = await storage.getUserByUsername(username);
+  const passwordHash = await bcrypt.hash(password, 12);
+
+  if (existing) {
+    await storage.updateUser(existing.id, { role: "admin", active: true });
+    await storage.updateUserPassword(existing.id, passwordHash);
+    await storage.createSystemLog({
+      level: "warning",
+      source: "bootstrap",
+      message: "Promoted existing user to admin (bootstrap).",
+      metadata: { userId: existing.id, username },
+    });
+    return;
+  }
+
+  const created = await storage.createUser({
+    username,
+    passwordHash,
+    role: "admin",
+    active: true,
+    displayName: "Administrador",
+    permissions: [],
+    notifyEnabled: true,
+    notifyBatchWindowSec: 120,
+    notifyBatchMaxItems: 5,
+  });
+
+  await storage.createSystemLog({
+    level: "warning",
+    source: "bootstrap",
+    message: "Created admin user (bootstrap).",
+    metadata: { userId: created.id, username },
+  });
+}
+
+export async function logAdminStatus(): Promise<void> {
+  const users = await storage.getUsers();
+  const admins = users.filter((user) => user.role === "admin" && user.active);
+  if (admins.length === 0) {
+    console.warn("[auth] No active admin users found in DB.");
+    await storage.createSystemLog({
+      level: "warning",
+      source: "bootstrap",
+      message: "No active admin users found in DB.",
+      metadata: { count: 0 },
+    });
+    return;
+  }
+
+  const safeAdmins = admins.map((admin) => ({
+    id: admin.id,
+    username: admin.username,
+    role: admin.role,
+    active: admin.active,
+  }));
+
+  console.log("[auth] Active admins:", safeAdmins);
+  await storage.createSystemLog({
+    level: "info",
+    source: "bootstrap",
+    message: "Active admin users found in DB.",
+    metadata: { count: safeAdmins.length, admins: safeAdmins },
+  });
 }
 
 export function setupAuth(app: Express): {
@@ -64,26 +154,79 @@ export function setupAuth(app: Express): {
     },
   });
 
+  const buildAuthUser = (user: User): AuthUser => ({
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    displayName: user.displayName ?? null,
+    executivePhone: user.executivePhone ?? null,
+    permissions: user.permissions ?? [],
+    notifyEnabled: user.notifyEnabled ?? true,
+    notifyBatchWindowSec: user.notifyBatchWindowSec ?? 120,
+    notifyBatchMaxItems: user.notifyBatchMaxItems ?? 5,
+  });
+
+  const legacyAdminUser: AuthUser = {
+    id: "legacy-admin",
+    username: adminUsername,
+    role: "admin",
+    displayName: "Administrador",
+    executivePhone: null,
+    permissions: [],
+    notifyEnabled: true,
+    notifyBatchWindowSec: 120,
+    notifyBatchMaxItems: 5,
+    legacy: true,
+  };
+
   passport.use(
-    new LocalStrategy((username, password, done) => {
-      if (username === adminUsername && password === adminPassword) {
-        const user: AuthUser = { username: adminUsername, role: "admin" };
-        return done(null, user);
+    new LocalStrategy(async (username, password, done) => {
+      try {
+        const user = await storage.getUserByUsername(username);
+        if (user) {
+          if (!user.active) {
+            return done(null, false, { message: "Usuario inactivo" });
+          }
+          const match = await bcrypt.compare(password, user.passwordHash);
+          if (!match) {
+            return done(null, false, { message: "Credenciales inválidas" });
+          }
+          return done(null, buildAuthUser(user));
+        }
+
+        if (username === adminUsername && password === adminPassword) {
+          console.warn("[auth] Using legacy ADMIN_USERNAME/ADMIN_PASSWORD login.");
+          return done(null, legacyAdminUser);
+        }
+
+        return done(null, false, { message: "Credenciales inválidas" });
+      } catch (error) {
+        return done(error);
       }
-      return done(null, false, { message: "Credenciales inválidas" });
     })
   );
 
   passport.serializeUser((user: any, done) => {
-    done(null, (user as AuthUser).username);
+    done(null, (user as AuthUser).id);
   });
 
-  passport.deserializeUser((username: string, done) => {
-    if (username === adminUsername) {
-      const user: AuthUser = { username: adminUsername, role: "admin" };
-      return done(null, user);
+  passport.deserializeUser(async (id: string, done) => {
+    try {
+      if (id === legacyAdminUser.id) {
+        return done(null, legacyAdminUser);
+      }
+
+      const user = await storage.getUser(id);
+      if (!user) {
+        return done(null, false);
+      }
+      if (!user.active) {
+        return done(null, false);
+      }
+      return done(null, buildAuthUser(user));
+    } catch (error) {
+      return done(error);
     }
-    return done(null, false);
   });
 
   app.use(sessionMiddleware);
@@ -101,13 +244,18 @@ export function setupAuth(app: Express): {
     if (!req.isAuthenticated || !req.isAuthenticated()) {
       return res.status(401).json({ error: "No autenticado" });
     }
-    const user = (req.user || { username: adminUsername, role: "admin" }) as
-      | AuthUser
-      | undefined;
+    const user = (req.user || legacyAdminUser) as AuthUser | undefined;
 
     return res.json({
+      id: user?.id ?? legacyAdminUser.id,
       username: user?.username ?? adminUsername,
       role: user?.role ?? "admin",
+      displayName: user?.displayName ?? null,
+      executivePhone: user?.executivePhone ?? null,
+      notifyEnabled: user?.notifyEnabled ?? true,
+      notifyBatchWindowSec: user?.notifyBatchWindowSec ?? 120,
+      notifyBatchMaxItems: user?.notifyBatchMaxItems ?? 5,
+      permissions: user?.permissions ?? [],
     });
   });
 
@@ -133,8 +281,15 @@ export function setupAuth(app: Express): {
           }
           const authUser = user as AuthUser;
           return res.json({
+            id: authUser.id,
             username: authUser.username,
             role: authUser.role,
+            displayName: authUser.displayName ?? null,
+            executivePhone: authUser.executivePhone ?? null,
+            notifyEnabled: authUser.notifyEnabled ?? true,
+            notifyBatchWindowSec: authUser.notifyBatchWindowSec ?? 120,
+            notifyBatchMaxItems: authUser.notifyBatchMaxItems ?? 5,
+            permissions: authUser.permissions ?? [],
           });
         });
       }
@@ -186,3 +341,7 @@ export function bindAuthToSocket(
     return next();
   });
 }
+
+
+
+

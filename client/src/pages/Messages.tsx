@@ -29,6 +29,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useArchiveConversation,
+  useAuthMe,
   useContacts,
   useDebtors,
   useDeleteConversation,
@@ -37,13 +38,16 @@ import {
   useSendMessage,
   useSessions,
 } from "@/lib/api";
+import { getErrorMessage } from "@/lib/errors";
 import type { Contact, Debtor, Message } from "@shared/schema";
 
 export default function Messages() {
+  const { data: user } = useAuthMe();
+  const canManualSend = user?.role === "admin" || user?.role === "supervisor";
   const { data: messages, isLoading: messagesLoading } = useMessages();
   const { data: debtors } = useDebtors();
   const { data: contacts } = useContacts();
-  const { data: sessions } = useSessions();
+  const { data: sessions } = useSessions(canManualSend);
   const sendMessage = useSendMessage();
   const markConversationRead = useMarkConversationRead();
   const archiveConversation = useArchiveConversation();
@@ -366,6 +370,7 @@ export default function Messages() {
     selectedContact?.executiveRut ??
     "";
   const selectedRut =
+    selectedDebtor?.rut ??
     selectedDebtor?.metadata?.rut ??
     selectedContact?.rut ??
     "";
@@ -380,6 +385,35 @@ export default function Messages() {
       hour: "2-digit",
       minute: "2-digit",
     });
+  };
+
+  const formatMessageMeta = (message: Message) => {
+    const parts: string[] = [];
+    const status = (message.status ?? "sent").toLowerCase();
+    const isIncoming = status === "received";
+
+    if (message.editedAt) {
+      parts.push("Editado");
+    }
+
+    if (status === "failed") {
+      parts.push("Fallido");
+      return parts.join(" • ");
+    }
+
+    if (!isIncoming) {
+      if (message.readAt) {
+        parts.push("Leído");
+      } else if (message.deliveredAt) {
+        parts.push("Entregado");
+      } else if (status === "sent") {
+        parts.push("Enviado");
+      } else if (status === "pending") {
+        parts.push("Pendiente");
+      }
+    }
+
+    return parts.join(" • ");
   };
 
   const formatStatusLabel = (status?: string) => {
@@ -514,7 +548,7 @@ export default function Messages() {
         setSelectedConversationKey(null);
       }
     } catch (error: any) {
-      alert("No se pudo actualizar el archivo: " + (error?.message ?? error));
+      alert("No se pudo actualizar el archivo: " + getErrorMessage(error));
     }
   };
 
@@ -530,7 +564,7 @@ export default function Messages() {
     try {
       await markConversationRead.mutateAsync({ phone, read: shouldMarkRead });
     } catch (error: any) {
-      alert("No se pudo actualizar el estado: " + (error?.message ?? error));
+      alert("No se pudo actualizar el estado: " + getErrorMessage(error));
     }
   };
 
@@ -550,7 +584,7 @@ export default function Messages() {
       await deleteConversation.mutateAsync({ phone });
       setSelectedConversationKey(null);
     } catch (error: any) {
-      alert("No se pudo eliminar la conversación: " + (error?.message ?? error));
+      alert("No se pudo eliminar la conversación: " + getErrorMessage(error));
     }
   };
 
@@ -584,7 +618,7 @@ export default function Messages() {
       });
       setInputText("");
     } catch (error: any) {
-      alert('Error al enviar: ' + error.message);
+      alert("Error al enviar: " + getErrorMessage(error));
     }
   };
 
@@ -895,6 +929,7 @@ export default function Messages() {
                  <div className="space-y-4">
                    {selectedMessages.map((msg) => {
                      const isIncoming = msg.status === "received";
+                     const metaText = formatMessageMeta(msg);
                      return (
                        <div
                          key={msg.id}
@@ -920,7 +955,7 @@ export default function Messages() {
                                    minute: "2-digit",
                                  })
                                : "Pendiente"}
-                             {msg.status === "failed" && " â€¢ Fallido"}
+                             {metaText && ` • ${metaText}`}
                            </span>
                          </div>
                        </div>
@@ -937,40 +972,46 @@ export default function Messages() {
               </ScrollArea>
 
               {/* Input Area */}
-              <div className="p-4 bg-card border-t flex gap-2 items-center">
-                 <Select value={selectedSessionId || ""} onValueChange={setSelectedSessionId}>
-                   <SelectTrigger className="w-40 shrink-0">
-                     <SelectValue placeholder="Sesión" />
-                   </SelectTrigger>
-                   <SelectContent>
-                     {connectedSessions.map((session) => (
-                       <SelectItem key={session.id} value={session.id}>
-                         {session.phoneNumber?.slice(-8) || 'Sin número'}
-                       </SelectItem>
-                     ))}
-                 </SelectContent>
-                 </Select>
-                 <Input 
-                   placeholder="Escribe un mensaje..." 
-                   value={inputText}
-                   onChange={(e) => setInputText(e.target.value)}
-                   onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                   className="flex-1 bg-secondary/50 border-0 focus-visible:ring-1"
-                   disabled={sendMessage.isPending}
-                 />
-                 <Button 
-                   onClick={handleSend} 
-                   size="icon" 
-                   className="shrink-0 rounded-full"
-                   disabled={sendMessage.isPending || !selectedSessionId}
-                 >
-                   {sendMessage.isPending ? (
-                     <Loader2 className="h-4 w-4 animate-spin" />
-                   ) : (
-                     <Send className="h-4 w-4" />
-                   )}
-                 </Button>
-              </div>
+              {canManualSend ? (
+                <div className="p-4 bg-card border-t flex gap-2 items-center">
+                   <Select value={selectedSessionId || ""} onValueChange={setSelectedSessionId}>
+                     <SelectTrigger className="w-40 shrink-0">
+                       <SelectValue placeholder="Sesión" />
+                     </SelectTrigger>
+                     <SelectContent>
+                       {connectedSessions.map((session) => (
+                         <SelectItem key={session.id} value={session.id}>
+                           {session.phoneNumber?.slice(-8) || 'Sin número'}
+                         </SelectItem>
+                       ))}
+                   </SelectContent>
+                   </Select>
+                   <Input 
+                     placeholder="Escribe un mensaje..." 
+                     value={inputText}
+                     onChange={(e) => setInputText(e.target.value)}
+                     onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                     className="flex-1 bg-secondary/50 border-0 focus-visible:ring-1"
+                     disabled={sendMessage.isPending}
+                   />
+                   <Button 
+                     onClick={handleSend} 
+                     size="icon" 
+                     className="shrink-0 rounded-full"
+                     disabled={sendMessage.isPending || !selectedSessionId}
+                   >
+                     {sendMessage.isPending ? (
+                       <Loader2 className="h-4 w-4 animate-spin" />
+                     ) : (
+                       <Send className="h-4 w-4" />
+                     )}
+                   </Button>
+                </div>
+              ) : (
+                <div className="p-4 bg-card border-t text-xs text-muted-foreground">
+                  Solo supervisores y administradores pueden enviar mensajes manuales.
+                </div>
+              )}
             </>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">

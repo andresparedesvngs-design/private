@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useContacts, useUpdateContact } from "@/lib/api";
+import { getErrorMessage } from "@/lib/errors";
 import { Loader2, Save, Search } from "lucide-react";
 import type { Contact } from "@shared/schema";
 
@@ -82,7 +83,7 @@ export default function Contacts() {
         return next;
       });
     } catch (error: any) {
-      alert("No se pudo guardar el contacto: " + (error?.message ?? error));
+      alert("No se pudo guardar el contacto: " + getErrorMessage(error));
     } finally {
       setSavingId(null);
     }

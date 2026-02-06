@@ -62,6 +62,10 @@ export function useSocket() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     });
 
+    socket.on('pool:updated', () => {
+      queryClient.invalidateQueries({ queryKey: ['pools'] });
+    });
+
     socket.on('campaign:started', () => {
       queryClient.invalidateQueries({ queryKey: ['campaigns'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
@@ -92,6 +96,14 @@ export function useSocket() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     });
 
+    socket.on('message:status', () => {
+      queryClient.invalidateQueries({ queryKey: ['messages'] });
+    });
+
+    socket.on('message:edited', () => {
+      queryClient.invalidateQueries({ queryKey: ['messages'] });
+    });
+
     socket.connect();
 
     return () => {
@@ -102,12 +114,15 @@ export function useSocket() {
       socket.off('session:ready');
       socket.off('session:auth_failed');
       socket.off('session:disconnected');
+      socket.off('pool:updated');
       socket.off('campaign:started');
       socket.off('campaign:paused');
       socket.off('campaign:progress');
       socket.off('campaign:updated');
       socket.off('message:created');
       socket.off('message:received');
+      socket.off('message:status');
+      socket.off('message:edited');
 
       socket.disconnect();
     };

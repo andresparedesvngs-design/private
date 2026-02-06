@@ -3,24 +3,57 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { useSessions, useCreateSession, useDeleteSession, useReconnectSession, useResetSessionAuth, useEnableSessionQr } from "@/lib/api";
+import {
+  useAuthMe,
+  useSessions,
+  useSessionsHealth,
+  useCreateSession,
+  useDeleteSession,
+  useReconnectSession,
+  useResetSessionAuth,
+  useEnableSessionQr,
+  useVerifySessionsNow,
+  type SessionHealthSnapshot,
+} from "@/lib/api";
 import { Smartphone, Plus, Trash2, RefreshCw, QrCode, Loader2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Session } from "@shared/schema";
+import { useToast } from "@/hooks/use-toast";
+import { getErrorMessage } from "@/lib/errors";
 
 export default function Sessions() {
+  const { data: user } = useAuthMe();
+  const canManageSessions = user?.role === "admin" || user?.role === "supervisor";
+  const canDeleteSessions = user?.role === "admin";
+  const { toast } = useToast();
   const [isQRModalOpen, setIsQRModalOpen] = useState(false);
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [hasSeenPendingSession, setHasSeenPendingSession] = useState(false);
   const [reconnectingId, setReconnectingId] = useState<string | null>(null);
   const [resettingId, setResettingId] = useState<string | null>(null);
   const [qrModalMode, setQrModalMode] = useState<"create" | "reconnect">("create");
-  const { data: sessions, isLoading } = useSessions();
+  const [healthSnapshot, setHealthSnapshot] = useState<SessionHealthSnapshot[] | null>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const { data: sessions, isLoading } = useSessions(canManageSessions);
+  const sessionsHealth = useSessionsHealth(false);
   const createSession = useCreateSession();
   const deleteSession = useDeleteSession();
   const reconnectSession = useReconnectSession();
   const resetSessionAuth = useResetSessionAuth();
   const enableSessionQr = useEnableSessionQr();
+  const verifySessionsNow = useVerifySessionsNow();
+
+  if (!canManageSessions) {
+    return (
+      <Layout>
+        <Card>
+          <CardContent className="p-6 text-sm text-muted-foreground">
+            No autorizado.
+          </CardContent>
+        </Card>
+      </Layout>
+    );
+  }
 
   const handleCreateSession = async () => {
     try {
@@ -53,6 +86,31 @@ export default function Sessions() {
       console.error('Failed to reconnect session:', error);
     } finally {
       setReconnectingId(null);
+    }
+  };
+
+  const handleVerifySessions = async () => {
+    try {
+      setIsVerifying(true);
+      const result = await verifySessionsNow.mutateAsync();
+      try {
+        const healthResult = await sessionsHealth.refetch();
+        setHealthSnapshot(healthResult.data ?? null);
+      } catch {
+        setHealthSnapshot(null);
+      }
+      toast({
+        title: "Validación completada",
+        description: `Verificadas ${result.verified}/${result.checked} (fallidas ${result.failed})`,
+      });
+    } catch (error: any) {
+      toast({
+        title: "No se pudo validar",
+        description: getErrorMessage(error, "Error al validar sesiones."),
+        variant: "destructive",
+      });
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -89,20 +147,36 @@ export default function Sessions() {
     []
   );
 
+  const sessionList = useMemo(() => {
+    if (!sessions) return sessions;
+    if (!healthSnapshot?.length) return sessions;
+    const byId = new Map(healthSnapshot.map((entry) => [entry.sessionId, entry]));
+    return sessions.map((session) => {
+      const runtime = byId.get(session.id);
+      if (!runtime) return session;
+      return {
+        ...session,
+        status: runtime.status ?? session.status,
+        phoneNumber: runtime.phoneNumber ?? session.phoneNumber,
+        messagesSent: runtime.messagesSent ?? session.messagesSent,
+      };
+    });
+  }, [sessions, healthSnapshot]);
+
   const pendingSession = useMemo(() => {
-    if (!sessions?.length) return undefined;
+    if (!sessionList?.length) return undefined;
     if (pendingSessionId) {
-      const byId = sessions.find((s) => s.id === pendingSessionId);
+      const byId = sessionList.find((s) => s.id === pendingSessionId);
       if (byId) return byId;
     }
-    return sessions.find((s) => pendingStatuses.has(s.status));
-  }, [sessions, pendingSessionId, pendingStatuses]);
+    return sessionList.find((s) => pendingStatuses.has(s.status));
+  }, [sessionList, pendingSessionId, pendingStatuses]);
 
   useEffect(() => {
-    if (!pendingSessionId || !sessions?.length) {
+    if (!pendingSessionId || !sessionList?.length) {
       return;
     }
-    const current = sessions.find((s) => s.id === pendingSessionId);
+    const current = sessionList.find((s) => s.id === pendingSessionId);
     if (current) {
       if (!hasSeenPendingSession) {
         setHasSeenPendingSession(true);
@@ -125,7 +199,7 @@ export default function Sessions() {
       setIsQRModalOpen(false);
       setQrModalMode("create");
     }
-  }, [hasSeenPendingSession, pendingSessionId, qrModalMode, sessions]);
+  }, [hasSeenPendingSession, pendingSessionId, qrModalMode, sessionList]);
   const sessionStatusLabels: Record<string, string> = {
     connected: "Conectada",
     disconnected: "Desconectada",
@@ -156,64 +230,81 @@ export default function Sessions() {
             <h1 className="text-3xl font-heading font-bold text-foreground">Gestor de sesiones</h1>
             <p className="text-muted-foreground mt-1">Administra tus instancias conectadas de WhatsApp.</p>
           </div>
-          <Dialog
-            open={isQRModalOpen}
-            onOpenChange={(open) => {
-              setIsQRModalOpen(open);
-              if (!open) {
-                setPendingSessionId(null);
-                setHasSeenPendingSession(false);
-                setQrModalMode("create");
-              }
-            }}
-          >
-            <DialogTrigger asChild>
-              <Button 
-                className="gap-2 bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20"
-                onClick={handleCreateSession}
-                disabled={createSession.isPending}
+          {canManageSessions && (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                className="gap-2"
+                onClick={handleVerifySessions}
+                disabled={isVerifying || verifySessionsNow.isPending || sessionsHealth.isFetching}
               >
-                {createSession.isPending ? (
+                {isVerifying || verifySessionsNow.isPending || sessionsHealth.isFetching ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
-                  <Plus className="h-4 w-4" />
+                  <RefreshCw className="h-4 w-4" />
                 )}
-                Conectar nueva sesión
+                Validar sesiones
               </Button>
-            </DialogTrigger>
-            <DialogContent className="sm:max-w-md">
-              <DialogHeader>
-                <DialogTitle>
-                  {qrModalMode === "reconnect" ? "Reconectar sesión" : "Escanear código QR"}
-                </DialogTitle>
-                <DialogDescription>
-                  Abre WhatsApp en tu teléfono y escanea el código QR para conectar.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="flex flex-col items-center justify-center p-6 bg-white rounded-lg border">
-                <div className="w-64 h-64 bg-gray-100 rounded-lg flex items-center justify-center relative overflow-hidden">
-                  {pendingSession?.status === "qr_ready" && pendingSession.qrCode ? (
-                    <img 
-                      src={pendingSession.qrCode} 
-                      alt="QR Code" 
-                      className="w-full h-full object-contain"
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center gap-2">
-                      <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                      <span className="text-sm text-muted-foreground">Conectando...</span>
+              <Dialog
+                open={isQRModalOpen}
+                onOpenChange={(open) => {
+                  setIsQRModalOpen(open);
+                  if (!open) {
+                    setPendingSessionId(null);
+                    setHasSeenPendingSession(false);
+                    setQrModalMode("create");
+                  }
+                }}
+              >
+                <DialogTrigger asChild>
+                  <Button 
+                    className="gap-2 bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20"
+                    onClick={handleCreateSession}
+                    disabled={createSession.isPending}
+                  >
+                    {createSession.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Plus className="h-4 w-4" />
+                    )}
+                    Conectar nueva sesión
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="sm:max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>
+                      {qrModalMode === "reconnect" ? "Reconectar sesión" : "Escanear código QR"}
+                    </DialogTitle>
+                    <DialogDescription>
+                      Abre WhatsApp en tu teléfono y escanea el código QR para conectar.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="flex flex-col items-center justify-center p-6 bg-white rounded-lg border">
+                    <div className="w-64 h-64 bg-gray-100 rounded-lg flex items-center justify-center relative overflow-hidden">
+                      {pendingSession?.status === "qr_ready" && pendingSession.qrCode ? (
+                        <img 
+                          src={pendingSession.qrCode} 
+                          alt="QR Code" 
+                          className="w-full h-full object-contain"
+                        />
+                      ) : (
+                        <div className="flex flex-col items-center gap-2">
+                          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                          <span className="text-sm text-muted-foreground">Conectando...</span>
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-                <div className="mt-4 text-center space-y-2">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground justify-center">
-                    <RefreshCw className="h-3 w-3 animate-spin" />
-                    {modalStatusText}
+                    <div className="mt-4 text-center space-y-2">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground justify-center">
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        {modalStatusText}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
-            </DialogContent>
-          </Dialog>
+                </DialogContent>
+              </Dialog>
+            </div>
+          )}
         </div>
 
         {isLoading ? (
@@ -227,7 +318,7 @@ export default function Sessions() {
               <CardDescription>Listado compacto para administrar conexiones y QR.</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              {!sessions?.length ? (
+              {!sessionList?.length ? (
                 <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
                   <Smartphone className="h-8 w-8 mb-2 opacity-30" />
                   <p className="text-sm">No hay sesiones registradas</p>
@@ -241,7 +332,7 @@ export default function Sessions() {
                     <div className="col-span-2">Última actividad</div>
                     <div className="col-span-2 text-right">Acciones</div>
                   </div>
-                  {sessions.map((session) => {
+                  {(sessionList ?? []).map((session) => {
                     const canShowQr =
                       session.status === "qr_ready" ||
                       ["disconnected", "auth_failed"].includes(session.status);
@@ -278,6 +369,11 @@ export default function Sessions() {
                             <div className="text-xs text-muted-foreground font-mono">
                               {session.id.slice(0, 12)}...
                             </div>
+                            {session.purpose === "notify" && (
+                              <Badge variant="outline" className="mt-1 text-xs">
+                                Notificaciones
+                              </Badge>
+                            )}
                           </div>
                         </div>
                         <div className="col-span-2">
@@ -315,29 +411,32 @@ export default function Sessions() {
                               QR
                             </Button>
                           )}
-                          {["disconnected", "auth_failed", "initializing", "authenticated", "qr_ready"].includes(session.status) && (
+                          {canDeleteSessions &&
+                            ["disconnected", "auth_failed", "initializing", "authenticated", "qr_ready"].includes(session.status) && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="gap-2"
+                                onClick={() => handleResetAuth(session)}
+                                disabled={resettingId === session.id}
+                              >
+                                {resettingId === session.id ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : null}
+                                Reinciar auth
+                              </Button>
+                            )}
+                          {canDeleteSessions && (
                             <Button
-                              variant="outline"
-                              size="sm"
-                              className="gap-2"
-                              onClick={() => handleResetAuth(session)}
-                              disabled={resettingId === session.id}
+                              variant="ghost"
+                              size="icon"
+                              className="text-muted-foreground hover:text-destructive"
+                              onClick={() => handleDeleteSession(session.id)}
+                              disabled={deleteSession.isPending}
                             >
-                              {resettingId === session.id ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                              ) : null}
-                              Reinciar auth
+                              <Trash2 className="h-4 w-4" />
                             </Button>
                           )}
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="text-muted-foreground hover:text-destructive"
-                            onClick={() => handleDeleteSession(session.id)}
-                            disabled={deleteSession.isPending}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
                         </div>
                       </div>
                     );

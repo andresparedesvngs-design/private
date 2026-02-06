@@ -7,7 +7,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { connectDatabase } from "./db";
-import { setupAuth } from "./auth";
+import { createAdminIfMissing, logAdminStatus, setupAuth } from "./auth";
 import { registerHealthRoute } from "./health";
 
 initFileLogging();
@@ -23,13 +23,14 @@ declare module "http" {
 
 app.use(
   express.json({
+    limit: "2mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: "2mb" }));
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -127,6 +128,8 @@ app.use((req, res, next) => {
 
 (async () => {
   await connectDatabase();
+  await createAdminIfMissing();
+  await logAdminStatus();
   const { sessionMiddleware, ensureAuthenticated } = setupAuth(app);
 
   registerHealthRoute(app);

@@ -9,6 +9,7 @@ export const insertSessionSchema = z.object({
   battery: z.number().optional().nullable(),
   messagesSent: z.number().default(0),
   lastActive: z.date().optional().nullable(),
+  purpose: z.string().optional().default("default"),
 });
 
 export const insertPoolSchema = z.object({
@@ -46,6 +47,7 @@ export const insertCampaignSchema = z.object({
   smsPoolId: z.string().optional().nullable(),
   fallbackSms: z.boolean().optional(),
   status: z.string().default("draft"),
+  pausedReason: z.string().optional().nullable(),
   poolId: z.string().optional().nullable(),
   debtorRangeStart: z.number().int().min(1).optional().nullable(),
   debtorRangeEnd: z.number().int().min(1).optional().nullable(),
@@ -56,6 +58,7 @@ export const insertCampaignSchema = z.object({
   progress: z.number().default(0),
   startedAt: z.date().optional().nullable(),
   completedAt: z.date().optional().nullable(),
+  ownerUserId: z.string().optional().nullable(),
 });
 
 export const insertDebtorSchema = z.object({
@@ -66,6 +69,8 @@ export const insertDebtorSchema = z.object({
   status: z.string().default("disponible"),
   lastContact: z.date().optional().nullable(),
   metadata: z.record(z.any()).optional().nullable(),
+  ownerUserId: z.string().optional().nullable(),
+  rut: z.string().optional().nullable(),
 });
 
 export const insertContactSchema = z.object({
@@ -94,6 +99,7 @@ export const insertMessageSchema = z.object({
   sentAt: z.date().optional().nullable(),
   deliveredAt: z.date().optional().nullable(),
   readAt: z.date().optional().nullable(),
+  editedAt: z.date().optional().nullable(),
   archived: z.boolean().optional(),
   error: z.string().optional().nullable(),
 });
@@ -105,6 +111,56 @@ export const insertSystemLogSchema = z.object({
   metadata: z.record(z.any()).optional().nullable(),
 });
 
+export const insertUserSchema = z.object({
+  username: z.string(),
+  passwordHash: z.string(),
+  role: z.enum(["admin", "supervisor", "executive"]).default("executive"),
+  active: z.boolean().default(true),
+  displayName: z.string().optional().nullable(),
+  executivePhone: z.string().optional().nullable(),
+  permissions: z.array(z.string()).default([]),
+  notifyEnabled: z.boolean().default(true),
+  notifyBatchWindowSec: z.number().int().positive().default(120),
+  notifyBatchMaxItems: z.number().int().positive().default(5),
+});
+
+export const insertNotificationBatchSchema = z.object({
+  executiveId: z.string(),
+  items: z.array(z.object({
+    debtorId: z.string(),
+    debtorName: z.string(),
+    debtorRut: z.string(),
+    snippet: z.string(),
+    campaignId: z.string().optional().nullable(),
+    campaignName: z.string().optional().nullable(),
+    receivedAt: z.date(),
+    sessionId: z.string().optional().nullable(),
+    count: z.number().int().positive().default(1),
+  })).default([]),
+  status: z.enum(["pending", "sending", "sent"]).default("pending"),
+  nextSendAt: z.date().optional().nullable(),
+});
+
+export const insertWhatsAppVerificationBatchSchema = z.object({
+  poolId: z.string().optional().nullable(),
+  requestedBy: z.string().optional().nullable(),
+  total: z.number().int().nonnegative().default(0),
+  verified: z.number().int().nonnegative().default(0),
+  failed: z.number().int().nonnegative().default(0),
+  status: z.enum(["running", "completed"]).default("completed"),
+});
+
+export const insertWhatsAppVerificationSchema = z.object({
+  batchId: z.string(),
+  poolId: z.string().optional().nullable(),
+  rut: z.string().optional().nullable(),
+  phone: z.string(),
+  whatsapp: z.boolean(),
+  waId: z.string().optional().nullable(),
+  verifiedBy: z.string().optional().nullable(),
+  verifiedAt: z.date(),
+});
+
 // Esquemas de Mongoose (sin cambios)
 const sessionSchema = new mongoose.Schema({
   phoneNumber: { type: String, default: null },
@@ -113,6 +169,7 @@ const sessionSchema = new mongoose.Schema({
   battery: { type: Number, default: null },
   messagesSent: { type: Number, default: 0 },
   lastActive: { type: Date, default: null },
+  purpose: { type: String, default: "default", index: true },
 }, { timestamps: true });
 
 const poolSchema = new mongoose.Schema({
@@ -150,6 +207,7 @@ const campaignSchema = new mongoose.Schema({
   smsPoolId: { type: mongoose.Schema.Types.ObjectId, ref: "GsmPool", default: null },
   fallbackSms: { type: Boolean, default: false },
   status: { type: String, default: "draft" },
+  pausedReason: { type: String, default: null },
   poolId: { type: mongoose.Schema.Types.ObjectId, ref: "Pool", default: null },
   debtorRangeStart: { type: Number, default: null },
   debtorRangeEnd: { type: Number, default: null },
@@ -160,6 +218,7 @@ const campaignSchema = new mongoose.Schema({
   progress: { type: Number, default: 0 },
   startedAt: { type: Date, default: null },
   completedAt: { type: Date, default: null },
+  ownerUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
 }, { timestamps: true });
 
 const debtorSchema = new mongoose.Schema({
@@ -170,6 +229,8 @@ const debtorSchema = new mongoose.Schema({
   status: { type: String, default: "disponible" },
   lastContact: { type: Date, default: null },
   metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+  ownerUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
+  rut: { type: String, default: null },
 }, { timestamps: true });
 
 const contactSchema = new mongoose.Schema({
@@ -198,6 +259,7 @@ const messageSchema = new mongoose.Schema({
   sentAt: { type: Date, default: null },
   deliveredAt: { type: Date, default: null },
   readAt: { type: Date, default: null },
+  editedAt: { type: Date, default: null },
   archived: { type: Boolean, default: false, index: true },
   error: { type: String, default: null },
 }, { timestamps: true });
@@ -207,6 +269,58 @@ const systemLogSchema = new mongoose.Schema({
   source: { type: String, required: true },
   message: { type: String, required: true },
   metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+}, { timestamps: true });
+
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true, index: true },
+  passwordHash: { type: String, required: true },
+  role: { type: String, enum: ["admin", "supervisor", "executive"], default: "executive" },
+  active: { type: Boolean, default: true },
+  displayName: { type: String, default: null },
+  executivePhone: { type: String, default: null },
+  permissions: { type: [String], default: [] },
+  notifyEnabled: { type: Boolean, default: true },
+  notifyBatchWindowSec: { type: Number, default: 120 },
+  notifyBatchMaxItems: { type: Number, default: 5 },
+}, { timestamps: true });
+
+const notificationItemSchema = new mongoose.Schema({
+  debtorId: { type: mongoose.Schema.Types.ObjectId, ref: "Debtor", required: true },
+  debtorName: { type: String, required: true },
+  debtorRut: { type: String, required: true },
+  snippet: { type: String, required: true },
+  campaignId: { type: mongoose.Schema.Types.ObjectId, ref: "Campaign", default: null },
+  campaignName: { type: String, default: null },
+  receivedAt: { type: Date, required: true },
+  sessionId: { type: String, default: null },
+  count: { type: Number, default: 1 },
+}, { _id: false });
+
+const notificationBatchSchema = new mongoose.Schema({
+  executiveId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+  items: { type: [notificationItemSchema], default: [] },
+  status: { type: String, enum: ["pending", "sending", "sent"], default: "pending", index: true },
+  nextSendAt: { type: Date, default: null, index: true },
+}, { timestamps: true });
+
+const whatsappVerificationBatchSchema = new mongoose.Schema({
+  poolId: { type: mongoose.Schema.Types.ObjectId, ref: "Pool", default: null, index: true },
+  requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
+  total: { type: Number, default: 0 },
+  verified: { type: Number, default: 0 },
+  failed: { type: Number, default: 0 },
+  status: { type: String, enum: ["running", "completed"], default: "completed" },
+}, { timestamps: true });
+
+const whatsappVerificationSchema = new mongoose.Schema({
+  batchId: { type: mongoose.Schema.Types.ObjectId, ref: "WhatsAppVerificationBatch", required: true, index: true },
+  poolId: { type: mongoose.Schema.Types.ObjectId, ref: "Pool", default: null, index: true },
+  rut: { type: String, default: null },
+  phone: { type: String, required: true },
+  whatsapp: { type: Boolean, default: false, index: true },
+  waId: { type: String, default: null },
+  verifiedBy: { type: String, default: null },
+  verifiedAt: { type: Date, required: true },
 }, { timestamps: true });
 
 // Modelos de Mongoose
@@ -219,10 +333,31 @@ export const DebtorModel = mongoose.model("Debtor", debtorSchema);
 export const ContactModel = mongoose.model("Contact", contactSchema);
 export const MessageModel = mongoose.model("Message", messageSchema);
 export const SystemLogModel = mongoose.model("SystemLog", systemLogSchema);
+export const UserModel = mongoose.model("User", userSchema);
+export const NotificationBatchModel = mongoose.model("NotificationBatch", notificationBatchSchema);
+export const WhatsAppVerificationBatchModel = mongoose.model(
+  "WhatsAppVerificationBatch",
+  whatsappVerificationBatchSchema
+);
+export const WhatsAppVerificationModel = mongoose.model(
+  "WhatsAppVerification",
+  whatsappVerificationSchema
+);
 
 // Tipos TypeScript - Actualizados para coincidir con la transformación
-export type InsertUser = any;
-export type User = any;
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type User = BaseDocument & {
+  username: string;
+  passwordHash: string;
+  role: "admin" | "supervisor" | "executive";
+  active: boolean;
+  displayName?: string | null;
+  executivePhone?: string | null;
+  permissions: string[];
+  notifyEnabled: boolean;
+  notifyBatchWindowSec: number;
+  notifyBatchMaxItems: number;
+};
 
 // Base type para documentos transformados
 interface BaseDocument {
@@ -239,6 +374,7 @@ export type Session = BaseDocument & {
   battery?: number | null;
   messagesSent: number;
   lastActive?: Date | null;
+  purpose?: string;
 };
 
 export type InsertPool = z.infer<typeof insertPoolSchema>;
@@ -280,6 +416,7 @@ export type Campaign = BaseDocument & {
   smsPoolId?: string | null;
   fallbackSms?: boolean;
   status: string;
+  pausedReason?: string | null;
   poolId?: string | null;
   debtorRangeStart?: number | null;
   debtorRangeEnd?: number | null;
@@ -290,6 +427,7 @@ export type Campaign = BaseDocument & {
   progress: number;
   startedAt?: Date | null;
   completedAt?: Date | null;
+  ownerUserId?: string | null;
 };
 
 export type InsertDebtor = z.infer<typeof insertDebtorSchema>;
@@ -301,6 +439,8 @@ export type Debtor = BaseDocument & {
   status: string;
   lastContact?: Date | null;
   metadata?: Record<string, any> | null;
+  ownerUserId?: string | null;
+  rut?: string | null;
 };
 
 export type InsertContact = z.infer<typeof insertContactSchema>;
@@ -331,6 +471,7 @@ export type Message = BaseDocument & {
   sentAt?: Date | null;
   deliveredAt?: Date | null;
   readAt?: Date | null;
+  editedAt?: Date | null;
   archived?: boolean;
   error?: string | null;
 };
@@ -341,4 +482,48 @@ export type SystemLog = BaseDocument & {
   source: string;
   message: string;
   metadata?: Record<string, any> | null;
+};
+
+export type InsertNotificationBatch = z.infer<typeof insertNotificationBatchSchema>;
+export type NotificationBatch = BaseDocument & {
+  executiveId: string;
+  items: Array<{
+    debtorId: string;
+    debtorName: string;
+    debtorRut: string;
+    snippet: string;
+    campaignId?: string | null;
+    campaignName?: string | null;
+    receivedAt: Date;
+    sessionId?: string | null;
+    count: number;
+  }>;
+  status: "pending" | "sending" | "sent";
+  nextSendAt?: Date | null;
+};
+
+export type InsertWhatsAppVerificationBatch = z.infer<
+  typeof insertWhatsAppVerificationBatchSchema
+>;
+export type WhatsAppVerificationBatch = BaseDocument & {
+  poolId?: string | null;
+  requestedBy?: string | null;
+  total: number;
+  verified: number;
+  failed: number;
+  status: "running" | "completed";
+};
+
+export type InsertWhatsAppVerification = z.infer<
+  typeof insertWhatsAppVerificationSchema
+>;
+export type WhatsAppVerification = BaseDocument & {
+  batchId: string;
+  poolId?: string | null;
+  rut?: string | null;
+  phone: string;
+  whatsapp: boolean;
+  waId?: string | null;
+  verifiedBy?: string | null;
+  verifiedAt: Date;
 };

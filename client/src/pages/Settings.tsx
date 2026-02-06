@@ -8,13 +8,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  useAuthMe,
   useCampaignWindowSettings,
   useUpdateCampaignWindowSettings,
   useCampaignPauseSettings,
   useUpdateCampaignPauseSettings,
   useWhatsAppPollingSettings,
   useUpdateWhatsAppPollingSettings,
+  useUpdateMyProfile,
 } from "@/lib/api";
+import { getErrorMessage } from "@/lib/errors";
 import { useToast } from "@/hooks/use-toast";
 import { useEffect, useState } from "react";
 
@@ -25,12 +28,15 @@ function formatInterval(ms: number) {
 }
 
 export default function Settings() {
-  const { data, isLoading, isError } = useWhatsAppPollingSettings();
+  const { data: user } = useAuthMe();
+  const isExecutive = user?.role === "executive";
+  const { data, isLoading, isError } = useWhatsAppPollingSettings(!isExecutive);
   const update = useUpdateWhatsAppPollingSettings();
-  const { data: windowSettings, isLoading: windowLoading } = useCampaignWindowSettings();
+  const { data: windowSettings, isLoading: windowLoading } = useCampaignWindowSettings(!isExecutive);
   const updateWindow = useUpdateCampaignWindowSettings();
-  const { data: pauseSettings, isLoading: pauseLoading } = useCampaignPauseSettings();
+  const { data: pauseSettings, isLoading: pauseLoading } = useCampaignPauseSettings(!isExecutive);
   const updatePauses = useUpdateCampaignPauseSettings();
+  const updateProfile = useUpdateMyProfile();
   const { toast } = useToast();
   const [windowEnabled, setWindowEnabled] = useState(true);
   const [startTime, setStartTime] = useState("08:00");
@@ -44,6 +50,10 @@ export default function Settings() {
   const [pauseDurationsMode, setPauseDurationsMode] = useState<"list" | "range">("list");
   const [pauseApplyWhatsapp, setPauseApplyWhatsapp] = useState(true);
   const [pauseApplySms, setPauseApplySms] = useState(true);
+  const [notifyEnabled, setNotifyEnabled] = useState(true);
+  const [execPhone, setExecPhone] = useState("");
+  const [batchWindowSec, setBatchWindowSec] = useState("120");
+  const [batchMaxItems, setBatchMaxItems] = useState("5");
 
   const handleToggle = async (checked: boolean) => {
     try {
@@ -57,7 +67,7 @@ export default function Settings() {
     } catch (error: any) {
       toast({
         title: "No se pudo actualizar",
-        description: error?.message ?? "Error al guardar la configuración.",
+        description: getErrorMessage(error, "Error al guardar la configuración."),
         variant: "destructive",
       });
     }
@@ -83,6 +93,14 @@ export default function Settings() {
     setPauseApplySms(pauseSettings.applyToSms ?? true);
   }, [pauseSettings]);
 
+  useEffect(() => {
+    if (!user) return;
+    setNotifyEnabled(user.notifyEnabled ?? true);
+    setExecPhone(user.executivePhone ?? "");
+    setBatchWindowSec(String(user.notifyBatchWindowSec ?? 120));
+    setBatchMaxItems(String(user.notifyBatchMaxItems ?? 5));
+  }, [user]);
+
   const handleSaveWindow = async () => {
     try {
       await updateWindow.mutateAsync({
@@ -97,7 +115,7 @@ export default function Settings() {
     } catch (error: any) {
       toast({
         title: "No se pudo guardar",
-        description: error?.message ?? "Error al guardar el horario.",
+        description: getErrorMessage(error, "Error al guardar el horario."),
         variant: "destructive",
       });
     }
@@ -153,7 +171,29 @@ export default function Settings() {
     } catch (error: any) {
       toast({
         title: "No se pudo guardar",
-        description: error?.message ?? "Error al guardar las pausas.",
+        description: getErrorMessage(error, "Error al guardar las pausas."),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleSaveNotifications = async () => {
+    try {
+      const payload = {
+        executivePhone: execPhone ? execPhone.trim() : null,
+        notifyEnabled,
+        notifyBatchWindowSec: parsePositiveInt(batchWindowSec, 120),
+        notifyBatchMaxItems: parsePositiveInt(batchMaxItems, 5),
+      };
+      await updateProfile.mutateAsync(payload);
+      toast({
+        title: "Notificaciones actualizadas",
+        description: "Se guardaron tus preferencias de WhatsApp.",
+      });
+    } catch (error: any) {
+      toast({
+        title: "No se pudo guardar",
+        description: getErrorMessage(error, "Error al guardar las notificaciones."),
         variant: "destructive",
       });
     }
@@ -163,12 +203,93 @@ export default function Settings() {
     <Layout>
       <div className="flex flex-col gap-6">
         <div>
-          <h1 className="text-3xl font-heading font-bold text-foreground">Configuración del sistema</h1>
+          <h1 className="text-3xl font-heading font-bold text-foreground">
+            {isExecutive ? "Notificaciones" : "Configuración del sistema"}
+          </h1>
           <p className="text-muted-foreground mt-1">
-            Ajustes avanzados del servidor y herramientas de emergencia.
+            {isExecutive
+              ? "Gestiona tu WhatsApp para recibir respuestas agrupadas."
+              : "Ajustes avanzados del servidor y herramientas de emergencia."}
           </p>
         </div>
 
+        <Card>
+          <CardHeader>
+            <CardTitle>Notificaciones WhatsApp</CardTitle>
+            <CardDescription>
+              Resúmenes automáticos con nombre, RUT y snippet del mensaje recibido.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-col gap-4 rounded-lg border border-border/60 p-4">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor="notify-switch" className="text-base">Notificaciones activas</Label>
+                    <Badge variant={notifyEnabled ? "default" : "outline"}>
+                      {notifyEnabled ? "Activo" : "Desactivado"}
+                    </Badge>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    Recibe un resumen por WhatsApp cuando lleguen respuestas.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  {updateProfile.isPending && (
+                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                  )}
+                  <Switch
+                    id="notify-switch"
+                    checked={notifyEnabled}
+                    onCheckedChange={setNotifyEnabled}
+                    disabled={updateProfile.isPending}
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Teléfono WhatsApp</Label>
+                  <Input
+                    value={execPhone}
+                    onChange={(event) => setExecPhone(event.target.value)}
+                    placeholder="+56912345678"
+                    disabled={updateProfile.isPending}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Ventana (seg)</Label>
+                  <Input
+                    value={batchWindowSec}
+                    onChange={(event) => setBatchWindowSec(event.target.value)}
+                    disabled={updateProfile.isPending}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">Máx. ítems</Label>
+                  <Input
+                    value={batchMaxItems}
+                    onChange={(event) => setBatchMaxItems(event.target.value)}
+                    disabled={updateProfile.isPending}
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-end">
+                <Button
+                  className="w-full"
+                  onClick={handleSaveNotifications}
+                  disabled={updateProfile.isPending}
+                >
+                  Guardar notificaciones
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {!isExecutive && (
+          <>
         <Card>
           <CardHeader>
             <CardTitle>WhatsApp</CardTitle>
@@ -439,6 +560,8 @@ export default function Settings() {
             </div>
           </CardContent>
         </Card>
+          </>
+        )}
       </div>
     </Layout>
   );

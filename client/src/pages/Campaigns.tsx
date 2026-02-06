@@ -13,6 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   useCampaigns,
+  useAuthMe,
   usePools,
   useSessions,
   useDebtors,
@@ -65,6 +66,9 @@ export default function Campaigns() {
   const [isCreatePoolOpen, setIsCreatePoolOpen] = useState(false);
   const [step, setStep] = useState(1);
   const [activeTab, setActiveTab] = useState("campaigns");
+  const { data: user } = useAuthMe();
+  const isExecutive = user?.role === "executive";
+  const canManagePools = !isExecutive;
 
   const [campaignName, setCampaignName] = useState("");
   const [selectedPoolId, setSelectedPoolId] = useState("");
@@ -88,6 +92,12 @@ export default function Campaigns() {
     setIsCreateOpen(true);
     setLocation("/campaigns");
   }, [location, setLocation]);
+
+  useEffect(() => {
+    if (!canManagePools && activeTab === "pools") {
+      setActiveTab("campaigns");
+    }
+  }, [activeTab, canManagePools]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -158,11 +168,11 @@ export default function Campaigns() {
   const [selectedGsmLineIds, setSelectedGsmLineIds] = useState<string[]>([]);
 
   const { data: campaigns, isLoading: campaignsLoading } = useCampaigns();
-  const { data: pools, isLoading: poolsLoading } = usePools();
-  const { data: sessions } = useSessions();
-  const { data: gsmLines } = useGsmLines();
-  const { data: gsmPools } = useGsmPools();
-  const { data: pauseSettings } = useCampaignPauseSettings();
+  const { data: pools, isLoading: poolsLoading } = usePools(true);
+  const { data: sessions } = useSessions(canManagePools);
+  const { data: gsmLines } = useGsmLines(canManagePools);
+  const { data: gsmPools } = useGsmPools(true);
+  const { data: pauseSettings } = useCampaignPauseSettings(canManagePools);
   const { data: debtors } = useDebtors();
   const { data: campaignMessages, isLoading: campaignMessagesLoading } = useMessages(
     detailsCampaign?.id,
@@ -188,6 +198,20 @@ export default function Campaigns() {
   const totalAvailableDebtors = availableDebtors.length;
   const poolNameById = new Map((pools ?? []).map((pool) => [pool.id, pool.name]));
   const gsmPoolNameById = new Map((gsmPools ?? []).map((pool) => [pool.id, pool.name]));
+  const connectedSessionIds = new Set(
+    (sessions ?? [])
+      .filter((session) => session.status === "connected")
+      .map((session) => session.id)
+  );
+  const poolSessionStatsById = new Map(
+    (pools ?? []).map((pool) => {
+      const total = Array.isArray(pool.sessionIds) ? pool.sessionIds.length : 0;
+      const connected = Array.isArray(pool.sessionIds)
+        ? pool.sessionIds.filter((id) => connectedSessionIds.has(id)).length
+        : 0;
+      return [pool.id, { total, connected }];
+    })
+  );
   const debtorById = new Map((debtors ?? []).map((debtor) => [debtor.id, debtor]));
 
   const campaignDebtors = detailsCampaign
@@ -524,6 +548,12 @@ export default function Campaigns() {
     paused: "Pausada",
     completed: "Completada",
   };
+  const pauseReasonLabels: Record<string, string> = {
+    manual: "Pausa manual",
+    no_sessions: "Sin sesiones WhatsApp",
+    no_gsm_lines: "Sin líneas GSM",
+    session_disconnected: "Sesión desconectada",
+  };
   const campaignChannelLabels: Record<string, string> = {
     whatsapp: "WhatsApp",
     sms: "SMS",
@@ -538,6 +568,8 @@ export default function Campaigns() {
     turnos_aleatorios: "Turnos aleatorios",
   };
   const displayCampaignStatus = (status: string) => campaignStatusLabels[status] ?? status;
+  const displayPauseReason = (reason?: string | null) =>
+    reason ? pauseReasonLabels[reason] ?? reason : "";
   const displayCampaignChannel = (channel?: string, fallbackSms?: boolean) => {
     const base = channel ?? "whatsapp";
     const resolved = base === "whatsapp" && fallbackSms ? "whatsapp_fallback_sms" : base;
@@ -558,6 +590,7 @@ export default function Campaigns() {
     no_connected_sessions: "Sin sesiones",
     session_retry_reset: "Reintentando",
     scheduled_pause: "Pausa programada",
+    session_disconnected: "Sesión desconectada",
   };
   const displayPoolStrategy = (strategy: string) => poolStrategyLabels[strategy] ?? strategy;
   const requiresWhatsappPool = campaignChannel !== "sms";
@@ -979,9 +1012,9 @@ export default function Campaigns() {
           </div>
           
           <Tabs value={activeTab} onValueChange={setActiveTab} className="w-[400px]">
-            <TabsList className="grid w-full grid-cols-2">
+            <TabsList className={`grid w-full ${canManagePools ? "grid-cols-2" : "grid-cols-1"}`}>
               <TabsTrigger value="campaigns">Campañas activas</TabsTrigger>
-              <TabsTrigger value="pools">Pools de ruteo</TabsTrigger>
+              {canManagePools && <TabsTrigger value="pools">Pools de ruteo</TabsTrigger>}
             </TabsList>
           </Tabs>
 
@@ -1445,7 +1478,9 @@ export default function Campaigns() {
               const cooldown = cooldowns[campaign.id];
               const campaignError = campaignErrors[campaign.id];
               const remainingMs = cooldown ? cooldown.endAt - cooldownNow : 0;
-              const showCooldown = remainingMs > 0 && campaign.status === "active";
+              const showCooldown =
+                remainingMs > 0 &&
+                (campaign.status === "active" || campaign.status === "paused");
               const cooldownLabel =
                 cooldown?.reason && cooldownLabelByReason[cooldown.reason]
                   ? cooldownLabelByReason[cooldown.reason]
@@ -1501,6 +1536,14 @@ export default function Campaigns() {
                              WA: {pools?.find((p) => p.id === campaign.poolId)?.name || "Sin pool WA"}
                            </span>
                          )}
+                         {campaign.poolId && (
+                           <span className="flex items-center gap-1">
+                             <Zap className="h-3.5 w-3.5" />
+                             Sesiones: {(poolSessionStatsById.get(campaign.poolId)?.connected ?? 0).toLocaleString()}
+                             /
+                             {(poolSessionStatsById.get(campaign.poolId)?.total ?? 0).toLocaleString()}
+                           </span>
+                         )}
                          {campaign.smsPoolId && (
                            <span className="flex items-center gap-1">
                              <Zap className="h-3.5 w-3.5" />
@@ -1508,6 +1551,11 @@ export default function Campaigns() {
                            </span>
                          )}
                        </div>
+                      {campaign.status === "paused" && campaign.pausedReason && (
+                        <div className="text-xs text-amber-600">
+                          Motivo: {displayPauseReason(campaign.pausedReason)}
+                        </div>
+                      )}
                      </div>
 
                     <div className="flex-1 max-w-md space-y-2">
@@ -1524,7 +1572,7 @@ export default function Campaigns() {
                         <div className="text-xs text-amber-600">
                           {cooldownLabel === "Fuera de horario"
                             ? `Fuera de horario permitido. Reanudando en ${formatCooldown(remainingMs)}.`
-                            : `Pausado por seguridad. Reanudando en ${formatCooldown(remainingMs)}.`}
+                            : `Pausada temporalmente. Reanudando en ${formatCooldown(remainingMs)}.`}
                         </div>
                       )}
                     </div>
@@ -1663,10 +1711,26 @@ export default function Campaigns() {
                           <p className="text-xs text-muted-foreground">Estado</p>
                           <p>{displayCampaignStatus(detailsCampaign.status)}</p>
                         </div>
+                        {detailsCampaign.pausedReason && (
+                          <div>
+                            <p className="text-xs text-muted-foreground">Motivo pausa</p>
+                            <p>{displayPauseReason(detailsCampaign.pausedReason)}</p>
+                          </div>
+                        )}
                         <div>
                           <p className="text-xs text-muted-foreground">Pool WhatsApp</p>
                           <p>{detailsCampaign.poolId ? poolNameById.get(detailsCampaign.poolId) ?? detailsCampaign.poolId : "Sin pool"}</p>
                         </div>
+                        {detailsCampaign.poolId && (
+                          <div>
+                            <p className="text-xs text-muted-foreground">Sesiones activas</p>
+                            <p>
+                              {(poolSessionStatsById.get(detailsCampaign.poolId)?.connected ?? 0).toLocaleString()}
+                              /
+                              {(poolSessionStatsById.get(detailsCampaign.poolId)?.total ?? 0).toLocaleString()}
+                            </p>
+                          </div>
+                        )}
                         <div>
                           <p className="text-xs text-muted-foreground">Pool SMS</p>
                           <p>{detailsCampaign.smsPoolId ? gsmPoolNameById.get(detailsCampaign.smsPoolId) ?? detailsCampaign.smsPoolId : "Sin pool"}</p>

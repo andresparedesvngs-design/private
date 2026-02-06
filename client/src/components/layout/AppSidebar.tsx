@@ -25,60 +25,82 @@ import {
   Database
 } from "lucide-react";
 import { Link, useLocation } from "wouter";
-import logoUrl from "@assets/generated_images/minimalist_green_abstract_hexagon_logo_for_whatsapp_marketing_app.png";
 import { useAuthMe, useLogout } from "@/lib/api";
 import { disconnectSocket } from "@/lib/socket";
 
-const items = [
-  {
-    title: "Panel",
-    url: "/",
-    icon: LayoutDashboard,
-  },
-  {
-    title: "Sesiones",
-    url: "/sessions",
-    icon: Smartphone,
-  },
-  {
-    title: "Campañas",
-    url: "/campaigns",
-    icon: Send,
-  },
-  {
-    title: "Mensajes",
-    url: "/messages",
-    icon: MessageSquareText,
-  },
-  {
-    title: "Deudores",
-    url: "/debtors",
-    icon: Users,
-  },
-  {
-    title: "Contactos",
-    url: "/contacts",
-    icon: Database,
-  },
-  {
-    title: "Registros",
-    url: "/logs",
-    icon: Terminal,
-  },
-];
-
-const systemItems = [
-  {
-    title: "Configuración",
-    url: "/settings",
-    icon: Settings,
-  }
-];
+type SidebarItem = {
+  title: string;
+  url: string;
+  icon: typeof LayoutDashboard;
+  roles: Array<"admin" | "supervisor" | "executive">;
+};
 
 export function AppSidebar() {
   const [location] = useLocation();
   const { data: user } = useAuthMe();
   const logout = useLogout();
+  const role = (user?.role ?? "admin") as "admin" | "supervisor" | "executive";
+  const isExecutive = role === "executive";
+
+  const items: SidebarItem[] = [
+    {
+      title: "Panel",
+      url: "/",
+      icon: LayoutDashboard,
+      roles: ["admin", "supervisor", "executive"],
+    },
+    {
+      title: "Sesiones",
+      url: "/sessions",
+      icon: Smartphone,
+      roles: ["admin", "supervisor"],
+    },
+    {
+      title: isExecutive ? "Mis campañas" : "Campañas",
+      url: "/campaigns",
+      icon: Send,
+      roles: ["admin", "supervisor", "executive"],
+    },
+    {
+      title: "Mensajes",
+      url: "/messages",
+      icon: MessageSquareText,
+      roles: ["admin", "supervisor", "executive"],
+    },
+    {
+      title: isExecutive ? "Mis deudores" : "Deudores",
+      url: "/debtors",
+      icon: Users,
+      roles: ["admin", "supervisor", "executive"],
+    },
+    {
+      title: "Contactos",
+      url: "/contacts",
+      icon: Database,
+      roles: ["admin", "supervisor", "executive"],
+    },
+    {
+      title: "Registros",
+      url: "/logs",
+      icon: Terminal,
+      roles: ["admin", "supervisor"],
+    },
+  ];
+
+  const systemItems: SidebarItem[] = [
+    {
+      title: "Configuración",
+      url: "/settings",
+      icon: Settings,
+      roles: ["admin", "supervisor", "executive"],
+    },
+    {
+      title: "Usuarios/Permisos",
+      url: "/users",
+      icon: ShieldAlert,
+      roles: ["admin"],
+    },
+  ];
 
   const handleLogout = async () => {
     try {
@@ -89,18 +111,19 @@ export function AppSidebar() {
       disconnectSocket();
     }
   };
-  const initials = (user?.username ?? "AD").slice(0, 2).toUpperCase();
+  const displayName = user?.displayName || user?.username || "AD";
+  const initials = displayName.slice(0, 2).toUpperCase();
 
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader className="h-16 border-b border-sidebar-border flex items-center px-4">
         <div className="flex items-center gap-2 overflow-hidden transition-all duration-300 group-data-[collapsible=icon]:justify-center">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-            <img src={logoUrl} alt="Logo" className="h-6 w-6 object-contain" />
+            <img src="/favicon.png" alt="Logo" className="h-6 w-6 object-contain" />
           </div>
           <div className="flex flex-col gap-0.5 leading-none group-data-[collapsible=icon]:hidden">
-            <span className="font-heading font-semibold text-sidebar-foreground">WhatsMassive</span>
-            <span className="text-xs text-muted-foreground">v2.4.0</span>
+            <span className="font-heading font-semibold text-sidebar-foreground text-base">WhatsMassive</span>
+            <span className="text-xs text-muted-foreground uppercase tracking-wide">Sender</span>
           </div>
         </div>
       </SidebarHeader>
@@ -110,7 +133,7 @@ export function AppSidebar() {
           <SidebarGroupLabel>Plataforma</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {items.map((item) => (
+              {items.filter((item) => item.roles.includes(role)).map((item) => (
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton 
                     asChild 
@@ -133,7 +156,7 @@ export function AppSidebar() {
           <SidebarGroupLabel>Sistema</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {systemItems.map((item) => (
+              {systemItems.filter((item) => item.roles.includes(role)).map((item) => (
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton 
                     asChild

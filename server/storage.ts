@@ -9,6 +9,10 @@ import {
   ContactModel,
   MessageModel,
   SystemLogModel,
+  UserModel,
+  NotificationBatchModel,
+  WhatsAppVerificationBatchModel,
+  WhatsAppVerificationModel,
   type Session, type InsertSession,
   type Pool, type InsertPool,
   type GsmLine, type InsertGsmLine,
@@ -18,12 +22,21 @@ import {
   type Contact, type InsertContact,
   type Message, type InsertMessage,
   type SystemLog, type InsertSystemLog,
+  type User, type InsertUser,
+  type NotificationBatch, type InsertNotificationBatch,
+  type WhatsAppVerificationBatch, type InsertWhatsAppVerificationBatch,
+  type WhatsAppVerification, type InsertWhatsAppVerification,
 } from "@shared/schema";
 
 export interface IStorage {
-  getUser(id: string): Promise<any>;
-  getUserByUsername(username: string): Promise<any>;
-  createUser(user: any): Promise<any>;
+  getUser(id: string): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
+  getUsers(): Promise<User[]>;
+  getActiveAdminCount(): Promise<number>;
+  createUser(user: InsertUser): Promise<User>;
+  updateUser(id: string, data: Partial<InsertUser>): Promise<User | undefined>;
+  updateUserPassword(id: string, passwordHash: string): Promise<User | undefined>;
+  updateUserPermissions(id: string, permissions: string[]): Promise<User | undefined>;
 
   getSessions(): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
@@ -49,13 +62,13 @@ export interface IStorage {
   updateGsmPool(id: string, data: Partial<InsertGsmPool>): Promise<GsmPool | undefined>;
   deleteGsmPool(id: string): Promise<void>;
 
-  getCampaigns(): Promise<Campaign[]>;
+  getCampaigns(ownerUserId?: string | null): Promise<Campaign[]>;
   getCampaign(id: string): Promise<Campaign | undefined>;
   createCampaign(campaign: InsertCampaign): Promise<Campaign>;
   updateCampaign(id: string, data: Partial<InsertCampaign>): Promise<Campaign | undefined>;
   deleteCampaign(id: string): Promise<void>;
 
-  getDebtors(campaignId?: string): Promise<Debtor[]>;
+  getDebtors(campaignId?: string, ownerUserId?: string | null): Promise<Debtor[]>;
   getDebtor(id: string): Promise<Debtor | undefined>;
   getDebtorByPhone(phone: string): Promise<Debtor | undefined>;
   createDebtor(debtor: InsertDebtor): Promise<Debtor>;
@@ -69,25 +82,63 @@ export interface IStorage {
   upsertContacts(contacts: InsertContact[]): Promise<Contact[]>;
   updateContact(id: string, data: Partial<InsertContact>): Promise<Contact | undefined>;
 
-  getMessages(campaignId?: string): Promise<Message[]>;
+  getMessages(campaignId?: string, debtorIds?: string[], phones?: string[]): Promise<Message[]>;
   getMessage(id: string): Promise<Message | undefined>;
   createMessage(message: InsertMessage): Promise<Message>;
   updateMessage(id: string, data: Partial<InsertMessage>): Promise<Message | undefined>;
+  getMessageByProviderResponse(
+    providerResponse: string,
+    sessionId?: string | null
+  ): Promise<Message | undefined>;
+  updateMessageByProviderResponse(
+    providerResponse: string,
+    sessionId: string | null | undefined,
+    data: Partial<InsertMessage>
+  ): Promise<Message | undefined>;
   markMessagesReadByPhone(phone: string, read: boolean): Promise<number>;
   archiveMessagesByPhone(phone: string, archived: boolean): Promise<number>;
   deleteMessagesByPhone(phone: string): Promise<number>;
 
   getSystemLogs(limit?: number): Promise<SystemLog[]>;
   createSystemLog(log: InsertSystemLog): Promise<SystemLog>;
+
+  getNotificationBatchesForExecutive(executiveId: string): Promise<NotificationBatch[]>;
+  getPendingNotificationBatch(executiveId: string): Promise<NotificationBatch | undefined>;
+  upsertNotificationBatch(
+    executiveId: string,
+    updater: (existing: NotificationBatch | undefined) => InsertNotificationBatch
+  ): Promise<NotificationBatch>;
+  claimNextNotificationBatch(now: Date): Promise<NotificationBatch | undefined>;
+  markNotificationBatchSent(id: string): Promise<void>;
+  rescheduleNotificationBatch(id: string, nextSendAt: Date): Promise<void>;
+
+  getWhatsAppVerificationBatches(limit?: number): Promise<WhatsAppVerificationBatch[]>;
+  getWhatsAppVerificationBatch(id: string): Promise<WhatsAppVerificationBatch | undefined>;
+  createWhatsAppVerificationBatch(
+    batch: InsertWhatsAppVerificationBatch
+  ): Promise<WhatsAppVerificationBatch>;
+  updateWhatsAppVerificationBatch(
+    id: string,
+    data: Partial<InsertWhatsAppVerificationBatch>
+  ): Promise<WhatsAppVerificationBatch | undefined>;
+  createWhatsAppVerifications(
+    items: InsertWhatsAppVerification[]
+  ): Promise<WhatsAppVerification[]>;
+  getWhatsAppVerificationResults(
+    batchId: string,
+    limit?: number,
+    skip?: number
+  ): Promise<WhatsAppVerification[]>;
   
   resetDebtorsStatus(): Promise<number>;
   cleanupDebtors(statuses?: string[]): Promise<number>;
   releaseDebtorsByStatus(statuses: string[]): Promise<number>;
-  releaseDebtorsByStatusFromInactiveCampaigns(statuses: string[]): Promise<number>;
+  releaseDebtorsByStatusFromInactiveCampaigns(statuses: string[], ownerUserId?: string | null): Promise<number>;
   resetDebtorsForCampaign(campaignId: string, statuses: string[]): Promise<number>;
   assignAvailableOrphanDebtorsToCampaign(
     campaignId: string,
-    range?: { start?: number | null; end?: number | null }
+    range?: { start?: number | null; end?: number | null },
+    ownerUserId?: string | null
   ): Promise<number>;
 
   getDashboardStats(): Promise<{
@@ -134,6 +185,7 @@ export class MongoStorage implements IStorage {
       battery: obj.battery,
       messagesSent: obj.messagesSent,
       lastActive: obj.lastActive,
+      purpose: obj.purpose,
       createdAt: obj.createdAt,
       updatedAt: obj.updatedAt
     };
@@ -199,6 +251,7 @@ export class MongoStorage implements IStorage {
       smsPoolId: obj.smsPoolId ? obj.smsPoolId.toString() : obj.smsPoolId,
       fallbackSms: obj.fallbackSms,
       status: obj.status,
+      pausedReason: obj.pausedReason ?? null,
       poolId: obj.poolId ? obj.poolId.toString() : obj.poolId,
       debtorRangeStart: obj.debtorRangeStart,
       debtorRangeEnd: obj.debtorRangeEnd,
@@ -207,6 +260,7 @@ export class MongoStorage implements IStorage {
       delivered: obj.delivered,
       failed: obj.failed,
       progress: obj.progress,
+      ownerUserId: obj.ownerUserId ? obj.ownerUserId.toString() : obj.ownerUserId,
       createdAt: obj.createdAt,
       updatedAt: obj.updatedAt,
       startedAt: obj.startedAt,
@@ -226,6 +280,8 @@ export class MongoStorage implements IStorage {
       status: obj.status,
       lastContact: obj.lastContact,
       metadata: obj.metadata,
+      ownerUserId: obj.ownerUserId ? obj.ownerUserId.toString() : obj.ownerUserId,
+      rut: obj.rut,
       createdAt: obj.createdAt,
       updatedAt: obj.updatedAt
     };
@@ -268,6 +324,7 @@ export class MongoStorage implements IStorage {
       sentAt: obj.sentAt,
       deliveredAt: obj.deliveredAt,
       readAt: obj.readAt,
+      editedAt: obj.editedAt ?? null,
       archived: obj.archived,
       error: obj.error,
       createdAt: obj.createdAt,
@@ -286,6 +343,86 @@ export class MongoStorage implements IStorage {
       metadata: obj.metadata,
       createdAt: obj.createdAt,
       updatedAt: obj.updatedAt
+    };
+  }
+
+  private transformUser(user: any): User {
+    if (!user) return user;
+    const obj = user.toObject ? user.toObject() : user;
+    return {
+      id: obj._id ? obj._id.toString() : obj.id,
+      username: obj.username,
+      passwordHash: obj.passwordHash,
+      role: obj.role,
+      active: obj.active,
+      displayName: obj.displayName ?? null,
+      executivePhone: obj.executivePhone ?? null,
+      permissions: Array.isArray(obj.permissions) ? obj.permissions : [],
+      notifyEnabled: obj.notifyEnabled ?? true,
+      notifyBatchWindowSec: obj.notifyBatchWindowSec ?? 120,
+      notifyBatchMaxItems: obj.notifyBatchMaxItems ?? 5,
+      createdAt: obj.createdAt,
+      updatedAt: obj.updatedAt,
+    };
+  }
+
+  private transformNotificationBatch(batch: any): NotificationBatch {
+    if (!batch) return batch;
+    const obj = batch.toObject ? batch.toObject() : batch;
+    return {
+      id: obj._id ? obj._id.toString() : obj.id,
+      executiveId: obj.executiveId ? obj.executiveId.toString() : obj.executiveId,
+      items: Array.isArray(obj.items)
+        ? obj.items.map((item: any) => ({
+            debtorId: item.debtorId ? item.debtorId.toString() : item.debtorId,
+            debtorName: item.debtorName,
+            debtorRut: item.debtorRut,
+            snippet: item.snippet,
+            campaignId: item.campaignId ? item.campaignId.toString() : item.campaignId,
+            campaignName: item.campaignName ?? null,
+            receivedAt: item.receivedAt,
+            sessionId: item.sessionId ?? null,
+            count: item.count ?? 1,
+          }))
+        : [],
+      status: obj.status,
+      nextSendAt: obj.nextSendAt ?? null,
+      createdAt: obj.createdAt,
+      updatedAt: obj.updatedAt,
+    };
+  }
+
+  private transformWhatsAppVerificationBatch(batch: any): WhatsAppVerificationBatch {
+    if (!batch) return batch;
+    const obj = batch.toObject ? batch.toObject() : batch;
+    return {
+      id: obj._id ? obj._id.toString() : obj.id,
+      poolId: obj.poolId ? obj.poolId.toString() : obj.poolId,
+      requestedBy: obj.requestedBy ? obj.requestedBy.toString() : obj.requestedBy,
+      total: obj.total ?? 0,
+      verified: obj.verified ?? 0,
+      failed: obj.failed ?? 0,
+      status: obj.status ?? "completed",
+      createdAt: obj.createdAt,
+      updatedAt: obj.updatedAt,
+    };
+  }
+
+  private transformWhatsAppVerification(item: any): WhatsAppVerification {
+    if (!item) return item;
+    const obj = item.toObject ? item.toObject() : item;
+    return {
+      id: obj._id ? obj._id.toString() : obj.id,
+      batchId: obj.batchId ? obj.batchId.toString() : obj.batchId,
+      poolId: obj.poolId ? obj.poolId.toString() : obj.poolId,
+      rut: obj.rut ?? null,
+      phone: obj.phone,
+      whatsapp: Boolean(obj.whatsapp),
+      waId: obj.waId ?? null,
+      verifiedBy: obj.verifiedBy ?? null,
+      verifiedAt: obj.verifiedAt,
+      createdAt: obj.createdAt,
+      updatedAt: obj.updatedAt,
     };
   }
 
@@ -315,7 +452,7 @@ export class MongoStorage implements IStorage {
     const name = this.pickFirstText([debtor.name]) ?? phone;
     const metadata = debtor.metadata ?? {};
 
-    const rut = this.extractMetadataText(metadata, [
+    const rut = debtor.rut ?? this.extractMetadataText(metadata, [
       "rut",
       "RUT",
       "rut_deudor",
@@ -358,16 +495,63 @@ export class MongoStorage implements IStorage {
     };
   }
 
-  async getUser(id: string): Promise<any> {
-    return undefined;
+  async getUser(id: string): Promise<User | undefined> {
+    if (!mongoose.isValidObjectId(id)) return undefined;
+    const user = await UserModel.findById(id);
+    return user ? this.transformUser(user) : undefined;
   }
 
-  async getUserByUsername(username: string): Promise<any> {
-    return undefined;
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const trimmed = String(username ?? "").trim();
+    if (!trimmed) return undefined;
+    const user = await UserModel.findOne({ username: trimmed });
+    return user ? this.transformUser(user) : undefined;
   }
 
-  async createUser(user: any): Promise<any> {
-    return undefined;
+  async getUsers(): Promise<User[]> {
+    const users = await UserModel.find().sort({ createdAt: -1 });
+    return users.map((user) => this.transformUser(user));
+  }
+
+  async getActiveAdminCount(): Promise<number> {
+    return UserModel.countDocuments({ role: "admin", active: true });
+  }
+
+  async createUser(user: InsertUser): Promise<User> {
+    const created = await UserModel.create(user);
+    return this.transformUser(created);
+  }
+
+  async updateUser(id: string, data: Partial<InsertUser>): Promise<User | undefined> {
+    if (!mongoose.isValidObjectId(id)) return undefined;
+    const cleanedData: any = { ...data };
+    Object.keys(cleanedData).forEach((key) => {
+      if (cleanedData[key] === undefined) {
+        delete cleanedData[key];
+      }
+    });
+    const updated = await UserModel.findByIdAndUpdate(id, cleanedData, { new: true });
+    return updated ? this.transformUser(updated) : undefined;
+  }
+
+  async updateUserPassword(id: string, passwordHash: string): Promise<User | undefined> {
+    if (!mongoose.isValidObjectId(id)) return undefined;
+    const updated = await UserModel.findByIdAndUpdate(
+      id,
+      { passwordHash },
+      { new: true }
+    );
+    return updated ? this.transformUser(updated) : undefined;
+  }
+
+  async updateUserPermissions(id: string, permissions: string[]): Promise<User | undefined> {
+    if (!mongoose.isValidObjectId(id)) return undefined;
+    const updated = await UserModel.findByIdAndUpdate(
+      id,
+      { permissions },
+      { new: true }
+    );
+    return updated ? this.transformUser(updated) : undefined;
   }
 
   async getSessions(): Promise<Session[]> {
@@ -484,8 +668,12 @@ export class MongoStorage implements IStorage {
     await GsmPoolModel.findByIdAndDelete(id);
   }
 
-  async getCampaigns(): Promise<Campaign[]> {
-    const campaigns = await CampaignModel.find().sort({ createdAt: -1 });
+  async getCampaigns(ownerUserId?: string | null): Promise<Campaign[]> {
+    const query =
+      ownerUserId && mongoose.isValidObjectId(ownerUserId)
+        ? { ownerUserId }
+        : {};
+    const campaigns = await CampaignModel.find(query).sort({ createdAt: -1 });
     return campaigns.map(c => this.transformCampaign(c));
   }
 
@@ -511,11 +699,16 @@ export class MongoStorage implements IStorage {
     await CampaignModel.findByIdAndDelete(id);
   }
 
-  async getDebtors(campaignId?: string): Promise<Debtor[]> {
+  async getDebtors(campaignId?: string, ownerUserId?: string | null): Promise<Debtor[]> {
     if (campaignId && !mongoose.isValidObjectId(campaignId)) {
       return [];
     }
-    const query = campaignId ? { campaignId } : {};
+    if (ownerUserId && !mongoose.isValidObjectId(ownerUserId)) {
+      return [];
+    }
+    const query: Record<string, any> = {};
+    if (campaignId) query.campaignId = campaignId;
+    if (ownerUserId) query.ownerUserId = ownerUserId;
     const debtors = await DebtorModel.find(query).sort({ createdAt: -1 });
     return debtors.map(d => this.transformDebtor(d));
   }
@@ -690,10 +883,29 @@ export class MongoStorage implements IStorage {
     return updated ? this.transformContact(updated) : undefined;
   }
 
-  async getMessages(campaignId?: string): Promise<Message[]> {
-    const query = campaignId ? { campaignId } : {};
+  async getMessages(
+    campaignId?: string,
+    debtorIds?: string[],
+    phones?: string[]
+  ): Promise<Message[]> {
+    const query: Record<string, any> = {};
+    if (campaignId) {
+      query.campaignId = campaignId;
+    }
+    const hasDebtors = Array.isArray(debtorIds) && debtorIds.length > 0;
+    const hasPhones = Array.isArray(phones) && phones.length > 0;
+    if (hasDebtors && hasPhones) {
+      query.$or = [
+        { debtorId: { $in: debtorIds } },
+        { phone: { $in: phones } },
+      ];
+    } else if (hasDebtors) {
+      query.debtorId = { $in: debtorIds };
+    } else if (hasPhones) {
+      query.phone = { $in: phones };
+    }
     const messages = await MessageModel.find(query).sort({ createdAt: -1 });
-    return messages.map(m => this.transformMessage(m));
+    return messages.map((m) => this.transformMessage(m));
   }
 
   async getMessage(id: string): Promise<Message | undefined> {
@@ -728,6 +940,33 @@ export class MongoStorage implements IStorage {
   async updateMessage(id: string, data: Partial<InsertMessage>): Promise<Message | undefined> {
     if (!mongoose.isValidObjectId(id)) return undefined;
     const updated = await MessageModel.findByIdAndUpdate(id, data, { new: true });
+    return updated ? this.transformMessage(updated) : undefined;
+  }
+
+  async getMessageByProviderResponse(
+    providerResponse: string,
+    sessionId?: string | null
+  ): Promise<Message | undefined> {
+    if (!providerResponse) return undefined;
+    const query: Record<string, any> = { providerResponse };
+    if (sessionId) {
+      query.sessionId = sessionId;
+    }
+    const message = await MessageModel.findOne(query).sort({ createdAt: -1 });
+    return message ? this.transformMessage(message) : undefined;
+  }
+
+  async updateMessageByProviderResponse(
+    providerResponse: string,
+    sessionId: string | null | undefined,
+    data: Partial<InsertMessage>
+  ): Promise<Message | undefined> {
+    if (!providerResponse) return undefined;
+    const query: Record<string, any> = { providerResponse };
+    if (sessionId) {
+      query.sessionId = sessionId;
+    }
+    const updated = await MessageModel.findOneAndUpdate(query, data, { new: true });
     return updated ? this.transformMessage(updated) : undefined;
   }
 
@@ -789,7 +1028,10 @@ export class MongoStorage implements IStorage {
     return result.modifiedCount || 0;
   }
 
-  async releaseDebtorsByStatusFromInactiveCampaigns(statuses: string[]): Promise<number> {
+  async releaseDebtorsByStatusFromInactiveCampaigns(
+    statuses: string[],
+    ownerUserId?: string | null
+  ): Promise<number> {
     if (!statuses.length) {
       return 0;
     }
@@ -801,6 +1043,9 @@ export class MongoStorage implements IStorage {
       status: { $in: statuses },
       campaignId: { $ne: null },
     };
+    if (ownerUserId && mongoose.isValidObjectId(ownerUserId)) {
+      query.ownerUserId = ownerUserId;
+    }
 
     if (activeCampaignIds.length > 0) {
       query.campaignId.$nin = activeCampaignIds;
@@ -828,7 +1073,8 @@ export class MongoStorage implements IStorage {
 
   async assignAvailableOrphanDebtorsToCampaign(
     campaignId: string,
-    range?: { start?: number | null; end?: number | null }
+    range?: { start?: number | null; end?: number | null },
+    ownerUserId?: string | null
   ): Promise<number> {
     if (!mongoose.isValidObjectId(campaignId)) {
       return 0;
@@ -844,9 +1090,14 @@ export class MongoStorage implements IStorage {
     const start = normalizeValue(range?.start);
     const end = normalizeValue(range?.end);
 
+    const ownerFilter =
+      ownerUserId && mongoose.isValidObjectId(ownerUserId)
+        ? { ownerUserId }
+        : {};
+
     if (start === null && end === null) {
       const result = await DebtorModel.updateMany(
-        { campaignId: null, status: "disponible" },
+        { campaignId: null, status: "disponible", ...ownerFilter },
         { $set: { campaignId } }
       );
       return result.modifiedCount || 0;
@@ -857,7 +1108,7 @@ export class MongoStorage implements IStorage {
       return 0;
     }
 
-    const query = { campaignId: null, status: "disponible" };
+    const query = { campaignId: null, status: "disponible", ...ownerFilter };
     const cursor = DebtorModel.find(query)
       .sort({ createdAt: -1 })
       .skip(Math.max(effectiveStart - 1, 0));
@@ -884,10 +1135,11 @@ export class MongoStorage implements IStorage {
   }
 
   async getDashboardStats() {
-    const [sessions, campaigns, debtors] = await Promise.all([
+    const [sessions, campaigns, debtors, sentCount] = await Promise.all([
       SessionModel.find(),
       CampaignModel.find(),
       DebtorModel.find(),
+      MessageModel.countDocuments({ status: "sent" }),
     ]);
 
     return {
@@ -896,8 +1148,138 @@ export class MongoStorage implements IStorage {
       totalCampaigns: campaigns.length,
       activeCampaigns: campaigns.filter(c => c.status === "active").length,
       totalDebtors: debtors.length,
-      messagesSent: sessions.reduce((sum, s) => sum + (s.messagesSent || 0), 0),
+      messagesSent: sentCount,
     };
+  }
+
+  async getNotificationBatchesForExecutive(executiveId: string): Promise<NotificationBatch[]> {
+    if (!mongoose.isValidObjectId(executiveId)) return [];
+    const batches = await NotificationBatchModel.find({ executiveId }).sort({
+      createdAt: -1,
+    });
+    return batches.map((batch) => this.transformNotificationBatch(batch));
+  }
+
+  async getPendingNotificationBatch(executiveId: string): Promise<NotificationBatch | undefined> {
+    if (!mongoose.isValidObjectId(executiveId)) return undefined;
+    const batch = await NotificationBatchModel.findOne({
+      executiveId,
+      status: "pending",
+    }).sort({ createdAt: -1 });
+    return batch ? this.transformNotificationBatch(batch) : undefined;
+  }
+
+  async upsertNotificationBatch(
+    executiveId: string,
+    updater: (existing: NotificationBatch | undefined) => InsertNotificationBatch
+  ): Promise<NotificationBatch> {
+    if (!mongoose.isValidObjectId(executiveId)) {
+      throw new Error("Invalid executive id");
+    }
+    const existingDoc = await NotificationBatchModel.findOne({
+      executiveId,
+      status: "pending",
+    }).sort({ createdAt: -1 });
+    const existing = existingDoc ? this.transformNotificationBatch(existingDoc) : undefined;
+    const next = updater(existing);
+    if (existingDoc) {
+      existingDoc.set(next);
+      const saved = await existingDoc.save();
+      return this.transformNotificationBatch(saved);
+    }
+    const created = await NotificationBatchModel.create(next);
+    return this.transformNotificationBatch(created);
+  }
+
+  async claimNextNotificationBatch(now: Date): Promise<NotificationBatch | undefined> {
+    const claimed = await NotificationBatchModel.findOneAndUpdate(
+      {
+        status: "pending",
+        nextSendAt: { $lte: now },
+      },
+      { $set: { status: "sending" } },
+      { new: true }
+    ).sort({ nextSendAt: 1 });
+    return claimed ? this.transformNotificationBatch(claimed) : undefined;
+  }
+
+  async markNotificationBatchSent(id: string): Promise<void> {
+    if (!mongoose.isValidObjectId(id)) return;
+    await NotificationBatchModel.findByIdAndUpdate(id, {
+      status: "sent",
+    });
+  }
+
+  async rescheduleNotificationBatch(id: string, nextSendAt: Date): Promise<void> {
+    if (!mongoose.isValidObjectId(id)) return;
+    await NotificationBatchModel.findByIdAndUpdate(id, {
+      status: "pending",
+      nextSendAt,
+    });
+  }
+
+  async getWhatsAppVerificationBatches(
+    limit: number = 20
+  ): Promise<WhatsAppVerificationBatch[]> {
+    const batches = await WhatsAppVerificationBatchModel.find()
+      .sort({ createdAt: -1 })
+      .limit(Math.max(limit, 0));
+    return batches.map((batch) => this.transformWhatsAppVerificationBatch(batch));
+  }
+
+  async getWhatsAppVerificationBatch(
+    id: string
+  ): Promise<WhatsAppVerificationBatch | undefined> {
+    if (!mongoose.isValidObjectId(id)) return undefined;
+    const batch = await WhatsAppVerificationBatchModel.findById(id);
+    return batch ? this.transformWhatsAppVerificationBatch(batch) : undefined;
+  }
+
+  async createWhatsAppVerificationBatch(
+    batch: InsertWhatsAppVerificationBatch
+  ): Promise<WhatsAppVerificationBatch> {
+    const created = await WhatsAppVerificationBatchModel.create(batch);
+    return this.transformWhatsAppVerificationBatch(created);
+  }
+
+  async updateWhatsAppVerificationBatch(
+    id: string,
+    data: Partial<InsertWhatsAppVerificationBatch>
+  ): Promise<WhatsAppVerificationBatch | undefined> {
+    if (!mongoose.isValidObjectId(id)) return undefined;
+    const cleanedData: any = { ...data };
+    Object.keys(cleanedData).forEach((key) => {
+      if (cleanedData[key] === undefined) {
+        delete cleanedData[key];
+      }
+    });
+    const updated = await WhatsAppVerificationBatchModel.findByIdAndUpdate(
+      id,
+      cleanedData,
+      { new: true }
+    );
+    return updated ? this.transformWhatsAppVerificationBatch(updated) : undefined;
+  }
+
+  async createWhatsAppVerifications(
+    items: InsertWhatsAppVerification[]
+  ): Promise<WhatsAppVerification[]> {
+    if (!items.length) return [];
+    const created = await WhatsAppVerificationModel.insertMany(items);
+    return created.map((item) => this.transformWhatsAppVerification(item));
+  }
+
+  async getWhatsAppVerificationResults(
+    batchId: string,
+    limit: number = 0,
+    skip: number = 0
+  ): Promise<WhatsAppVerification[]> {
+    if (!mongoose.isValidObjectId(batchId)) return [];
+    const query = WhatsAppVerificationModel.find({ batchId }).sort({ createdAt: -1 });
+    if (skip > 0) query.skip(skip);
+    if (limit > 0) query.limit(limit);
+    const results = await query;
+    return results.map((item) => this.transformWhatsAppVerification(item));
   }
 }
 

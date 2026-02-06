@@ -23,14 +23,25 @@
 ## 3. Autenticación y control de acceso
 
 - Auth local vía `passport-local` y sesiones en memoria (`memorystore`), cookie `wm.sid`. Ver `server/auth.ts`.
+- Usuarios en DB (`User`), con fallback temporal `ADMIN_USERNAME`/`ADMIN_PASSWORD` cuando no existe usuario. Ver `server/auth.ts`, `shared/schema.ts`.
 - Las rutas `/api/auth/*` y `/api/health` se registran antes del middleware global; el resto de `/api/*` está protegido por `ensureAuthenticated`. Ver `server/index.ts` y `server/auth.ts`.
 - Socket.IO aplica middleware de sesión y rechaza conexiones sin sesión válida. Ver `server/auth.ts` y `server/routes.ts`.
 
 ## 4. Contratos de dominio (fuente: shared/schema.ts)
 
 ### 4.1 Session (WhatsApp)
-- Campos: `phoneNumber`, `status`, `qrCode`, `battery`, `messagesSent`, `lastActive`, timestamps. Ver `shared/schema.ts`.
+- Campos: `phoneNumber`, `status`, `qrCode`, `battery`, `messagesSent`, `lastActive`, `purpose`, timestamps. Ver `shared/schema.ts`.
 - Estados observados en backend/UI: `initializing`, `qr_ready`, `authenticated`, `connected`, `reconnecting`, `auth_failed`, `disconnected`. Ver `server/whatsappManager.ts`, `client/src/pages/Sessions.tsx`.
+- El `status` persistido puede quedar desfasado frente al estado real; ver “Estado verificado de sesión”.
+
+### Estado verificado de sesión
+- **Diferencia status vs runtime**: el `status` en Mongo puede no reflejar la conexión real.
+- **Heartbeat**: si `WHATSAPP_POLL_ENABLED=true`, `whatsappManager` ejecuta `client.getState()` cada `WHATSAPP_POLL_INTERVAL_MS`.
+- **Campos runtime** (no persistidos): `lastVerifiedAt`, `lastVerifiedOk`, `lastVerifyError`.
+- **verifiedConnected**: `status="connected"` + `lastVerifiedOk=true` + `lastVerifiedAt` reciente (`WHATSAPP_VERIFY_WINDOW_MS`, default 30s).
+- **Campañas**: `campaignEngine` usa solo sesiones verificadas.
+- Endpoint admin: `GET /api/sessions/health`.
+- Verificación manual: `POST /api/sessions/verify-now` (admin/supervisor) fuerza heartbeat sin reconectar ni generar QR.
 
 ### 4.2 Pool (WhatsApp routing)
 - Campos: `name`, `strategy`, `delayBase`, `delayVariation`, `sessionIds`, `active`. Ver `shared/schema.ts`.
@@ -45,13 +56,13 @@
 - Estrategias usadas: `fixed_turns`, `random_turns`. Ver `client/src/pages/Campaigns.tsx`.
 
 ### 4.5 Campaign
-- Campos: `name`, `message`, `messageVariants`, `messageRotationStrategy`, `channel`, `smsPoolId`, `fallbackSms`, `status`, `poolId`, `debtorRangeStart`, `debtorRangeEnd`, `totalDebtors`, `sent`, `failed`, `progress`, `startedAt`, `completedAt`. Ver `shared/schema.ts`.
+- Campos: `name`, `message`, `messageVariants`, `messageRotationStrategy`, `channel`, `smsPoolId`, `fallbackSms`, `status`, `poolId`, `debtorRangeStart`, `debtorRangeEnd`, `totalDebtors`, `sent`, `failed`, `progress`, `startedAt`, `completedAt`, `ownerUserId`. Ver `shared/schema.ts`.
 - Canales reales: `whatsapp`, `sms`, `whatsapp_fallback_sms` (más `fallbackSms` boolean). Ver `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
 - Estados usados por backend: `draft`, `active`, `paused`, `completed`. Ver `server/routes.ts`, `server/campaignEngine.ts`.
 - El backend **no** asigna `status="error"`; los errores de campaña se comunican vía evento `campaign:error`. La UI muestra un badge/tooltip usando ese evento, sin inventar estados nuevos. Ver `client/src/pages/Campaigns.tsx`, `server/campaignEngine.ts`.
 
 ### 4.6 Debtor (deudor/contacto de campaña)
-- Campos: `campaignId`, `name`, `phone`, `debt`, `status`, `lastContact`, `metadata`. Ver `shared/schema.ts`.
+- Campos: `campaignId`, `name`, `phone`, `debt`, `status`, `lastContact`, `metadata`, `ownerUserId`, `rut`. Ver `shared/schema.ts`.
 - Estados reales: `disponible`, `procesando`, `completado`, `fallado`. Ver `server/campaignEngine.ts`, `client/src/pages/Debtors.tsx`.
 - `metadata` guarda campos dinámicos (ej. ejecutivo). Ver `client/src/pages/Debtors.tsx`, `client/src/pages/Messages.tsx`.
 
@@ -67,6 +78,13 @@
 - Campos: `level`, `source`, `message`, `metadata`. Ver `shared/schema.ts`.
 - Se usa para auditoría y observabilidad en UI. Ver `server/storage.ts`, `client/src/pages/SystemLogs.tsx`.
 
+### 4.10 User
+- Campos: `username`, `passwordHash`, `role`, `active`, `displayName`, `executivePhone`, `permissions`, `notifyEnabled`, `notifyBatchWindowSec`, `notifyBatchMaxItems`. Ver `shared/schema.ts`.
+- Roles: `admin`, `supervisor`, `executive`. Ver `server/auth.ts`, `server/routes.ts`.
+
+### 4.11 NotificationBatch
+- Campos: `executiveId`, `items[]` (`debtorId`, `debtorName`, `debtorRut`, `snippet`, `campaignId`, `campaignName`, `receivedAt`, `sessionId`, `count`), `status`, `nextSendAt`. Ver `shared/schema.ts`, `server/notificationService.ts`.
+
 ## 5. Flujos end-to-end (UI → API → DB/Sockets)
 
 ### 5.1 Login
@@ -76,6 +94,8 @@
 - Crear sesión: UI → POST `/api/sessions` → `storage.createSession` + `whatsappManager.createSession`, luego QR vía `/api/sessions/:id/qr`. Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
 - QR manual: `WHATSAPP_QR_MANUAL` + ventana QR (`WHATSAPP_QR_WINDOW_MS`). Ver `server/whatsappManager.ts`.
 - Reconnect / reset auth: UI usa `/api/sessions/:id/reconnect` y `/api/sessions/:id/reset-auth`. Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
+- Health de sesiones (admin): `GET /api/sessions/health` devuelve estado verificado y último heartbeat.
+- Validar sesiones: UI → `POST /api/sessions/verify-now`, luego refresca con `GET /api/sessions/health`.
 
 ### 5.3 Campañas
 - Crear campaña: UI → POST `/api/campaigns` (Zod). Ver `client/src/pages/Campaigns.tsx`, `server/routes.ts`.
@@ -103,6 +123,9 @@
 - Ventana horaria: `/api/settings/campaign-window` (overrides). Ver `client/src/pages/Settings.tsx`, `server/routes.ts`, `server/campaignEngine.ts`.
 - Pausas en campañas: `/api/settings/campaign-pauses`. Ver `client/src/pages/Settings.tsx`, `server/routes.ts`, `server/campaignEngine.ts`.
 
+### 5.9 Usuarios y permisos
+- Admin gestiona usuarios/roles/permisos vía `/api/users` y UI `Users.tsx`. Ejecutivos actualizan sus notificaciones por `/api/users/me`. Ver `server/routes.ts`, `client/src/pages/Users.tsx`, `client/src/pages/Settings.tsx`.
+
 ## 6. API HTTP (contratos reales)
 
 ### Auth
@@ -116,8 +139,19 @@
 ### Dashboard
 - `GET /api/dashboard/stats`
 
+### Users
+- `GET /api/users`
+- `POST /api/users`
+- `PATCH /api/users/:id`
+- `POST /api/users/:id/reset-password`
+- `PATCH /api/users/:id/permissions`
+- `GET /api/users/executives`
+- `PATCH /api/users/me`
+
 ### Sessions
 - `GET /api/sessions`, `GET /api/sessions/:id`, `POST /api/sessions`, `PATCH /api/sessions/:id`, `DELETE /api/sessions/:id`
+- `GET /api/sessions/health` (admin)
+- `POST /api/sessions/verify-now` (admin/supervisor)
 - `POST /api/sessions/:id/reconnect`, `POST /api/sessions/:id/reset-auth`, `POST /api/sessions/:id/qr`
 - `POST /api/sessions/:id/send` (envío manual)
 
@@ -134,6 +168,7 @@
 
 ### Debtors
 - `GET /api/debtors`, `GET /api/debtors/:id`, `POST /api/debtors`, `POST /api/debtors/bulk`, `PATCH /api/debtors/:id`, `DELETE /api/debtors/:id`
+- `PATCH /api/debtors/:id/assign`, `POST /api/debtors/assign-bulk`
 - `POST /api/debtors/reset`, `POST /api/debtors/cleanup`, `POST /api/debtors/release`
 
 ### Contacts
@@ -162,6 +197,7 @@
 ## 8. Invariantes operativas (no romper)
 
 - **Campañas**: WhatsApp requiere `poolId` con sesiones asignadas; SMS requiere `smsPoolId` con líneas activas. Si no se cumplen, la campaña se pausa o falla. Ver `server/campaignEngine.ts`.
+- **Sesiones verificadas**: las campañas solo usan sesiones con `verifiedConnected=true`. Si no hay, se pausa la campaña y queda log de espera.
 - **Estados de deudores**: el motor cambia `disponible → procesando → completado|fallado`. UI y reportes dependen de estos estados. Ver `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
 - **Templates**: `campaign.message` es obligatorio y se complementa con `messageVariants`. Tokens `{nombre}`, `{deuda}`, `{phone}`, y metadata `{<key>}` se reemplazan. Ver `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
 - **Storage**: `storage` transforma `_id` a `id` y tipos Date; no saltarse esta capa si se cambia persistencia. Ver `server/storage.ts`.
@@ -176,7 +212,35 @@
 
 - El favicon configurado en `client/index.html` apunta a `/favicon.png` (no SVG). Ver `client/index.html`.
 
-## 10. Desalineaciones / UNKNOWN (hechos observables)
+## 10. Migración y estado del sistema
+
+- **Protección de admins**: el backend bloquea desactivar o degradar al último admin activo. Ver `server/routes.ts`.
+- **Fallback temporal**: `ADMIN_USERNAME`/`ADMIN_PASSWORD` solo se usan si no existe usuario en DB. Ver `server/auth.ts`.
+
+### 10.1 Crear primer admin en DB
+1. Inicia sesión con el fallback `ADMIN_USERNAME`/`ADMIN_PASSWORD`.
+2. Crea un usuario admin en `Usuarios/Permisos` o con `POST /api/users` (`role=admin`).
+3. Verifica que el admin quede `active=true`.
+
+### 10.2 Migrar ownership y RUT
+- Script: `script/migrate-ownership-rut.ts`.
+- Flags:
+  - `--default-user-id <id>` o `--default-username <username>` (debe ser admin o supervisor activo).
+  - `--dry-run` para previsualizar sin escribir.
+- Ejemplos:
+```bash
+npx tsx script/migrate-ownership-rut.ts --default-username admin
+npx tsx script/migrate-ownership-rut.ts --default-user-id 64f... --dry-run
+```
+- Resultados y conteos quedan registrados en `SystemLog` con `source="migration"`. Ver `script/migrate-ownership-rut.ts`, `server/storage.ts`.
+
+### 10.3 Retirar fallback ADMIN_*
+1. Asegura al menos un admin activo en DB.
+2. Elimina `ADMIN_USERNAME`/`ADMIN_PASSWORD` del `.env`.
+3. Reinicia el servidor.
+
+## 11. Desalineaciones / UNKNOWN (hechos observables)
 
 - `components.json` referencia `tailwind.config.ts`, pero ese archivo no existe en el repo → **UNKNOWN**.
 - Infraestructura CI/CD, Docker, despliegue fuera de Replit: **UNKNOWN**.
+- Taxonomía de `permissions[]` (mapeo permisos → acciones) no está definida en el repo → **UNKNOWN**.

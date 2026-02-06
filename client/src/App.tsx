@@ -13,6 +13,7 @@ import Contacts from "@/pages/Contacts";
 import Messages from "@/pages/Messages";
 import SystemLogs from "@/pages/SystemLogs";
 import Settings from "@/pages/Settings";
+import Users from "@/pages/Users";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -26,6 +27,7 @@ function Router() {
       <Route path="/messages" component={Messages} />
       <Route path="/logs" component={SystemLogs} />
       <Route path="/settings" component={Settings} />
+      <Route path="/users" component={Users} />
       <Route component={NotFound} />
     </Switch>
   );

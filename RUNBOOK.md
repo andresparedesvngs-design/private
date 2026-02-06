@@ -62,6 +62,7 @@
 - `WHATSAPP_AUTO_RESTORE` — restaura sesiones al iniciar (`server/routes.ts`).
 - `WHATSAPP_QR_MANUAL`, `WHATSAPP_QR_WINDOW_MS` — control de QR manual (`server/whatsappManager.ts`).
 - `WHATSAPP_POLL_ENABLED`, `WHATSAPP_POLL_INTERVAL_MS` — polling de mensajes entrantes (`server/whatsappManager.ts`).
+- `WHATSAPP_VERIFY_WINDOW_MS` — ventana máxima (ms) para considerar una sesión como verificada (default 30000).
 - `WHATSAPP_USER_AGENT` / `PUPPETEER_USER_AGENT` — user agent opcional (`server/whatsappManager.ts`).
 - `PUPPETEER_EXECUTABLE_PATH` / `CHROME_PATH` — ruta explícita a Chrome/Chromium (`server/whatsappManager.ts`).
 
@@ -95,10 +96,23 @@
 - **No conecta a MongoDB**: revisar `MONGODB_URI` y que Mongo esté arriba (`server/db.ts`).
 - **No aparece QR**: si `WHATSAPP_QR_MANUAL=true`, la ventana QR se abre por `/api/sessions/:id/qr` (UI lo hace). Ver `server/whatsappManager.ts`, `client/src/pages/Sessions.tsx`.
 - **WhatsApp no inicia por Chrome**: definir `PUPPETEER_EXECUTABLE_PATH` o instalar Chrome/Chromium (ver rutas por OS en `server/whatsappManager.ts`).
-- **Campaña pausada por falta de sesiones**: revisar sesiones conectadas y pools (`server/campaignEngine.ts`).
+- **Campaña pausada por falta de sesiones**: verificar `verifiedConnected` con `/api/sessions/health` y revisar pools (`server/campaignEngine.ts`).
 - **Campaña pausada por falta de GSM lines**: verificar líneas activas y `smsPoolId` (`server/campaignEngine.ts`).
 - **Mensajes entrantes no llegan**: habilitar polling en Settings (usa `/api/settings/whatsapp-polling`).
 - **Logs con datos sensibles**: desactivar `LOG_HTTP_BODY` y `LOG_HTTP_HEADERS` en producción (`server/index.ts`).
+
+## Sesiones WhatsApp — estado verificado
+
+- **Qué significa `verifiedConnected`**: el backend valida conexión real con heartbeat (`client.getState()`), no solo el `status` persistido en Mongo.
+- **Heartbeat**: cuando `WHATSAPP_POLL_ENABLED=true`, cada `WHATSAPP_POLL_INTERVAL_MS` se verifica `getState()`; si falla, la sesión se marca `disconnected` y emite `session:disconnected`.
+- **Sesiones fantasma**: si el `status` en DB dice `connected` pero `verifiedConnected=false`, la sesión no es utilizable para campañas.
+- **Health endpoint**: `GET /api/sessions/health` (solo admin) devuelve `verifiedConnected`, `lastVerifiedAt` y `lastVerifyError`.
+- **Validar sesiones (manual)**: `POST /api/sessions/verify-now` (admin/supervisor) fuerza heartbeat inmediato sin reconectar ni generar QR; útil antes de iniciar campañas.
+- **Procedimiento cuando una sesión muere**:
+  1) Revisar `/api/sessions/health`.
+  2) Si `verifiedConnected=false`, usar `POST /api/sessions/:id/reconnect`.
+  3) Escanear QR y confirmar que `verifiedConnected=true`.
+- **Reset auth (manual)**: si reconnect no funciona, usar `POST /api/sessions/:id/reset-auth` y volver a escanear QR.
 
 ## UNKNOWN
 

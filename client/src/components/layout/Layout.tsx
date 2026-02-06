@@ -15,6 +15,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     messages: "Mensajes",
     logs: "Registros",
     settings: "Configuración",
+    users: "Usuarios",
   };
   const currentPage =
     pathSegments.length > 0
@@ -58,3 +59,5 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     </SidebarProvider>
   );
 }
+
+

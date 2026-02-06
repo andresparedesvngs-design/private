@@ -5,6 +5,8 @@ import path from "path";
 import QRCode from 'qrcode';
 import { storage } from './storage';
 import type { Server as SocketServer } from 'socket.io';
+import { notificationService } from "./notificationService";
+import type { InsertMessage } from "@shared/schema";
 
 export interface WhatsAppClient {
   id: string;
@@ -12,7 +14,23 @@ export interface WhatsAppClient {
   status: string;
   qrCode?: string;
   qrRaw?: string;
+  purpose?: string;
+  lastVerifiedAt?: Date;
+  lastVerifiedOk?: boolean;
+  lastVerifyError?: string;
 }
+
+export type VerifyNowResult = {
+  checked: number;
+  verified: number;
+  failed: number;
+  results: Array<{
+    sessionId: string;
+    phoneNumber: string | null;
+    verifiedConnected: boolean;
+    error?: string;
+  }>;
+};
 
 const clientAny = Client as any;
 if (!clientAny.__injectPatched) {
@@ -72,6 +90,7 @@ if (!clientAny.__injectPatched) {
 class WhatsAppManager {
   private clients: Map<string, WhatsAppClient> = new Map();
   private io?: SocketServer;
+  private sessionDisconnectHandler?: (sessionId: string, reason: string) => void;
   private recentIncomingMessageIds: Map<string, number> = new Map();
   private pollingTimers: Map<string, NodeJS.Timeout> = new Map();
   private pollingStartTimes: Map<string, number> = new Map();
@@ -82,6 +101,10 @@ class WhatsAppManager {
 
   setSocketServer(io: SocketServer) {
     this.io = io;
+  }
+
+  setSessionDisconnectHandler(handler?: (sessionId: string, reason: string) => void) {
+    this.sessionDisconnectHandler = handler;
   }
 
   private isManualQrMode(): boolean {
@@ -157,7 +180,7 @@ class WhatsAppManager {
     return value.replace(/@.+$/i, "").replace(/\D/g, "");
   }
 
-  private normalizePhoneForWhatsapp(phone: string): string {
+  normalizePhoneForWhatsapp(phone: string): string {
     const raw = phone.trim();
     if (!raw) return raw;
 
@@ -264,6 +287,14 @@ class WhatsAppManager {
     const envValue = Number(process.env.WHATSAPP_POLL_INTERVAL_MS ?? "15000");
     if (!Number.isFinite(envValue) || envValue <= 0) {
       return null;
+    }
+    return Math.floor(envValue);
+  }
+
+  private getVerifyWindowMs(): number {
+    const envValue = Number(process.env.WHATSAPP_VERIFY_WINDOW_MS ?? "30000");
+    if (!Number.isFinite(envValue) || envValue <= 0) {
+      return 30000;
     }
     return Math.floor(envValue);
   }
@@ -380,6 +411,143 @@ class WhatsAppManager {
     }
   }
 
+  private isVerifiedConnected(
+    client: WhatsAppClient,
+    nowMs: number,
+    maxAgeMs: number
+  ): boolean {
+    if (client.status !== "connected") {
+      return false;
+    }
+    if (!client.lastVerifiedOk || !client.lastVerifiedAt) {
+      return false;
+    }
+    return nowMs - client.lastVerifiedAt.getTime() <= maxAgeMs;
+  }
+
+  private async markSessionDisconnected(
+    sessionId: string,
+    whatsappClient: WhatsAppClient,
+    reason: string,
+    errorMessage?: string
+  ): Promise<void> {
+    const wasConnected = whatsappClient.status === "connected";
+    whatsappClient.status = "disconnected";
+    whatsappClient.lastVerifiedAt = new Date();
+    whatsappClient.lastVerifiedOk = false;
+    whatsappClient.lastVerifyError = errorMessage ?? reason;
+
+    this.clearQrWindow(sessionId);
+    this.stopIncomingPolling(sessionId);
+
+    await storage.updateSession(sessionId, { status: "disconnected" });
+
+    if (wasConnected) {
+      await storage.createSystemLog({
+        level: "warning",
+        source: "whatsapp",
+        message: `Session ${sessionId} disconnected (${reason})`,
+        metadata: { sessionId, reason, error: errorMessage ?? null },
+      });
+    }
+
+    if (this.io) {
+      if (wasConnected) {
+        this.io.emit("session:disconnected", { sessionId, reason });
+      }
+      this.io.emit("session:updated", { id: sessionId });
+    }
+
+    if (wasConnected && this.sessionDisconnectHandler) {
+      try {
+        this.sessionDisconnectHandler(sessionId, reason);
+      } catch (error) {
+        console.warn("Failed to notify session disconnect handler:", error);
+      }
+    }
+  }
+
+  private async getStateWithTimeout(
+    client: any,
+    timeoutMs: number
+  ): Promise<string | null> {
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`getState timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      client
+        .getState()
+        .then((state: string) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(state);
+        })
+        .catch((error: any) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        });
+    });
+  }
+
+  private async verifyConnectedState(
+    sessionId: string,
+    client: any,
+    whatsappClient: WhatsAppClient,
+    options?: { stateGetter?: () => Promise<string | null> }
+  ): Promise<{ ok: boolean; error?: string }> {
+    const now = new Date();
+    const getState = options?.stateGetter ?? (() => client.getState());
+    try {
+      const state = await getState();
+      if (state !== "CONNECTED") {
+        const error = `state=${state ?? "unknown"}`;
+        await this.markSessionDisconnected(
+          sessionId,
+          whatsappClient,
+          "heartbeat_failed",
+          error
+        );
+        return { ok: false, error };
+      }
+
+      const wasConnected = whatsappClient.status === "connected";
+      whatsappClient.status = "connected";
+      whatsappClient.lastVerifiedAt = now;
+      whatsappClient.lastVerifiedOk = true;
+      whatsappClient.lastVerifyError = undefined;
+
+      await storage.updateSession(sessionId, {
+        status: "connected",
+        lastActive: now,
+      });
+
+      if (!wasConnected) {
+        this.startIncomingPolling(sessionId, client);
+        if (this.io) {
+          this.io.emit("session:updated", { id: sessionId });
+        }
+      }
+
+      return { ok: true };
+    } catch (error: any) {
+      const message = error?.message ?? String(error);
+      await this.markSessionDisconnected(
+        sessionId,
+        whatsappClient,
+        "heartbeat_failed",
+        message
+      );
+      return { ok: false, error: message };
+    }
+  }
+
   private startIncomingPolling(sessionId: string, client: any) {
     if (this.pollingTimers.has(sessionId)) {
       return;
@@ -403,8 +571,18 @@ class WhatsAppManager {
       polling = true;
 
       try {
-        const state = await client.getState().catch(() => null);
-        if (state && state !== "CONNECTED") {
+        const sessionClient = this.clients.get(sessionId);
+        if (!sessionClient) {
+          polling = false;
+          return;
+        }
+
+        const verified = await this.verifyConnectedState(
+          sessionId,
+          client,
+          sessionClient
+        );
+        if (!verified.ok) {
           polling = false;
           return;
         }
@@ -511,6 +689,7 @@ class WhatsAppManager {
         phone,
         content,
         status: "received",
+        providerResponse: messageId,
         sentAt,
       });
 
@@ -542,6 +721,15 @@ class WhatsAppManager {
       if (this.io) {
         this.io.emit("message:received", createdMessage);
       }
+
+      void notificationService.enqueueIncomingMessage({
+        sessionId,
+        phone,
+        content,
+        sentAt,
+        debtor,
+        campaignId: debtor?.campaignId ?? null,
+      });
 
       console.log("Message received:", msg.from, msg.body);
     } catch (error: any) {
@@ -644,6 +832,9 @@ class WhatsAppManager {
       throw new Error('Session already exists');
     }
 
+    const sessionRecord = await storage.getSession(sessionId);
+    const sessionPurpose = sessionRecord?.purpose ?? "default";
+
     const resolveChromePath = () => {
       const envPath = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
       if (envPath && fs.existsSync(envPath)) {
@@ -696,7 +887,8 @@ class WhatsAppManager {
     const whatsappClient: WhatsAppClient = {
       id: sessionId,
       client,
-      status: 'initializing'
+      status: 'initializing',
+      purpose: sessionPurpose,
     };
 
     this.clients.set(sessionId, whatsappClient);
@@ -718,6 +910,9 @@ class WhatsAppManager {
         }
       }
       whatsappClient.status = 'connected';
+      whatsappClient.lastVerifiedAt = new Date();
+      whatsappClient.lastVerifiedOk = true;
+      whatsappClient.lastVerifyError = undefined;
 
       await storage.updateSession(sessionId, {
         status: 'connected',
@@ -889,32 +1084,17 @@ class WhatsAppManager {
 
     client.on('disconnected', async (reason) => {
       console.log('Client disconnected:', sessionId, reason);
-      whatsappClient.status = 'disconnected';
-      this.clearQrWindow(sessionId);
-      this.stopIncomingPolling(sessionId);
-
       if (authCheckTimer) {
         clearInterval(authCheckTimer);
         authCheckTimer = null;
       }
-      
-      await storage.updateSession(sessionId, {
-        status: 'disconnected'
-      });
 
-      if (this.io) {
-        this.io.emit('session:disconnected', {
-          sessionId,
-          reason
-        });
-      }
-
-      await storage.createSystemLog({
-        level: 'warning',
-        source: 'whatsapp',
-        message: `Session ${sessionId} disconnected`,
-        metadata: { reason }
-      });
+      await this.markSessionDisconnected(
+        sessionId,
+        whatsappClient,
+        "client_disconnected",
+        String(reason ?? "")
+      );
     });
 
     client.on("message", (msg) => {
@@ -923,6 +1103,85 @@ class WhatsAppManager {
 
     client.on("message_create", (msg) => {
       void this.handleIncomingMessage(sessionId, msg, "message_create");
+    });
+
+    client.on("message_ack", async (msg, ack) => {
+      const messageId =
+        msg?.id?._serialized ?? msg?.id?.id ?? (typeof msg?.id === "string" ? msg.id : "");
+      if (!messageId) {
+        return;
+      }
+      const ackValue = typeof ack === "number" ? ack : Number(ack ?? 0);
+      if (ackValue < 2) {
+        return;
+      }
+
+      try {
+        const existing = await storage.getMessageByProviderResponse(messageId, sessionId);
+        if (!existing) {
+          return;
+        }
+
+        const now = new Date();
+        const update: Partial<InsertMessage> = {};
+        if (ackValue >= 2 && !existing.deliveredAt) {
+          update.deliveredAt = now;
+        }
+        if (ackValue >= 3 && !existing.readAt) {
+          update.readAt = now;
+        }
+
+        if (Object.keys(update).length === 0) {
+          return;
+        }
+
+        const updated = await storage.updateMessage(existing.id, update);
+        if (this.io && updated) {
+          this.io.emit("message:status", {
+            id: updated.id,
+            deliveredAt: updated.deliveredAt ?? null,
+            readAt: updated.readAt ?? null,
+            ack: ackValue,
+          });
+        }
+      } catch (error: any) {
+        console.warn("Failed to process message_ack:", error?.message ?? error);
+      }
+    });
+
+    client.on("message_edit", async (msg, newBody) => {
+      const messageId =
+        msg?.id?._serialized ?? msg?.id?.id ?? (typeof msg?.id === "string" ? msg.id : "");
+      if (!messageId) {
+        return;
+      }
+      const content =
+        (typeof newBody === "string" && newBody.trim()) ||
+        (typeof msg?.body === "string" ? msg.body.trim() : "");
+      if (!content) {
+        return;
+      }
+
+      try {
+        const existing = await storage.getMessageByProviderResponse(messageId, sessionId);
+        if (!existing) {
+          return;
+        }
+
+        const updated = await storage.updateMessage(existing.id, {
+          content,
+          editedAt: new Date(),
+        });
+        if (this.io && updated) {
+          this.io.emit("message:edited", {
+            id: updated.id,
+            content: updated.content,
+            editedAt: updated.editedAt ?? null,
+          });
+        }
+      } catch (error: any) {
+        console.warn("Failed to process message_edit:", error?.message ?? error);
+      }
     });
 
     try {
@@ -1000,7 +1259,11 @@ class WhatsAppManager {
     }
   }
 
-  async sendMessage(sessionId: string, phoneNumber: string, message: string): Promise<boolean> {
+  async sendMessage(
+    sessionId: string,
+    phoneNumber: string,
+    message: string
+  ): Promise<{ messageId?: string }> {
     const whatsappClient = this.clients.get(sessionId);
     
     if (!whatsappClient) {
@@ -1024,7 +1287,11 @@ class WhatsAppManager {
         throw new Error(`Number ${phoneNumber} is not registered on WhatsApp`);
       }
       
-      await whatsappClient.client.sendMessage(formattedNumber, message);
+      const sentMessage = await whatsappClient.client.sendMessage(formattedNumber, message);
+      const messageId =
+        sentMessage?.id?._serialized ??
+        sentMessage?.id?.id ??
+        (typeof sentMessage?.id === "string" ? sentMessage.id : null);
       
       const session = await storage.getSession(sessionId);
       if (session) {
@@ -1034,15 +1301,19 @@ class WhatsAppManager {
         });
       }
 
-      return true;
+      return { messageId: messageId ?? undefined };
     } catch (error: any) {
       console.error('Error sending message:', error.message);
       
       if (error.message.includes('detached Frame') || 
           error.message.includes('Target closed') ||
           error.message.includes('Protocol error')) {
-        whatsappClient.status = 'disconnected';
-        await storage.updateSession(sessionId, { status: 'disconnected' });
+        await this.markSessionDisconnected(
+          sessionId,
+          whatsappClient,
+          "browser_error",
+          error.message
+        );
         console.log('Session marked as disconnected due to browser error:', sessionId);
       }
       
@@ -1059,13 +1330,152 @@ class WhatsAppManager {
   }
 
   getConnectedSessionIds(): string[] {
+    return this.getConnectedSessionIdsWithOptions();
+  }
+
+  getConnectedSessionIdsWithOptions(options?: { includeNotify?: boolean }): string[] {
     const connected: string[] = [];
+    const includeNotify = options?.includeNotify !== false;
     this.clients.forEach((client, id) => {
       if (client.status === 'connected') {
+        if (!includeNotify && client.purpose === "notify") {
+          return;
+        }
         connected.push(id);
       }
     });
     return connected;
+  }
+
+  getVerifiedConnectedSessionIdsWithOptions(options?: {
+    includeNotify?: boolean;
+    maxAgeMs?: number;
+  }): string[] {
+    const verified: string[] = [];
+    const includeNotify = options?.includeNotify !== false;
+    const maxAgeMs = options?.maxAgeMs ?? this.getVerifyWindowMs();
+    const nowMs = Date.now();
+
+    this.clients.forEach((client, id) => {
+      if (!includeNotify && client.purpose === "notify") {
+        return;
+      }
+      if (this.isVerifiedConnected(client, nowMs, maxAgeMs)) {
+        verified.push(id);
+      }
+    });
+
+    return verified;
+  }
+
+  getSessionHealthSnapshot(options?: {
+    includeNotify?: boolean;
+    maxAgeMs?: number;
+  }): Array<{
+    sessionId: string;
+    status: string;
+    verifiedConnected: boolean;
+    lastVerifiedAt: Date | null;
+    lastVerifyError: string | null;
+  }> {
+    const includeNotify = options?.includeNotify !== false;
+    const maxAgeMs = options?.maxAgeMs ?? this.getVerifyWindowMs();
+    const nowMs = Date.now();
+    const snapshot: Array<{
+      sessionId: string;
+      status: string;
+      verifiedConnected: boolean;
+      lastVerifiedAt: Date | null;
+      lastVerifyError: string | null;
+    }> = [];
+
+    this.clients.forEach((client, id) => {
+      if (!includeNotify && client.purpose === "notify") {
+        return;
+      }
+      snapshot.push({
+        sessionId: id,
+        status: client.status,
+        verifiedConnected: this.isVerifiedConnected(client, nowMs, maxAgeMs),
+        lastVerifiedAt: client.lastVerifiedAt ?? null,
+        lastVerifyError: client.lastVerifyError ?? null,
+      });
+    });
+
+    return snapshot;
+  }
+
+  async verifyNow(): Promise<VerifyNowResult> {
+    const timeoutMs = 5000;
+    const sessions = await storage.getSessions();
+    const phoneById = new Map(
+      sessions.map((session) => [session.id, session.phoneNumber ?? null])
+    );
+    const results: VerifyNowResult["results"] = [];
+    let checked = 0;
+    let verified = 0;
+    let failed = 0;
+
+    for (const [sessionId, whatsappClient] of this.clients.entries()) {
+      checked += 1;
+      let ok = false;
+      let error: string | undefined;
+
+      try {
+        const result = await this.verifyConnectedState(
+          sessionId,
+          whatsappClient.client,
+          whatsappClient,
+          {
+            stateGetter: () =>
+              this.getStateWithTimeout(whatsappClient.client, timeoutMs),
+          }
+        );
+        ok = result.ok;
+        error = result.error;
+      } catch (err: any) {
+        ok = false;
+        error = err?.message ?? String(err);
+      }
+
+      if (ok) {
+        verified += 1;
+      } else {
+        failed += 1;
+      }
+
+      results.push({
+        sessionId,
+        phoneNumber: phoneById.get(sessionId) ?? null,
+        verifiedConnected: ok,
+        ...(ok ? {} : { error: error ?? "unknown_error" }),
+      });
+    }
+
+    return {
+      checked,
+      verified,
+      failed,
+      results,
+    };
+  }
+
+  getConnectedNotifySessionId(): string | null {
+    let found: string | null = null;
+    this.clients.forEach((client, id) => {
+      if (found) return;
+      if (client.status === "connected" && client.purpose === "notify") {
+        found = id;
+      }
+    });
+    return found;
+  }
+
+  setSessionPurpose(sessionId: string, purpose?: string) {
+    const client = this.clients.get(sessionId);
+    if (client) {
+      client.purpose = purpose ?? "default";
+    }
   }
 
   isSessionConnected(sessionId: string): boolean {

@@ -21,9 +21,209 @@ class CampaignEngine {
   private campaignPauseDurationsModeOverride: "list" | "range" | null = null;
   private campaignPauseApplyWhatsappOverride: boolean | null = null;
   private campaignPauseApplySmsOverride: boolean | null = null;
+  private disconnectCooldowns: Map<
+    string,
+    { timeout: NodeJS.Timeout; interval?: NodeJS.Timeout; until: number }
+  > = new Map();
+  private readonly disconnectRefillIntervalMs = 60 * 1000;
 
   setSocketServer(io: SocketServer) {
     this.io = io;
+  }
+
+  private clearDisconnectCooldown(campaignId: string) {
+    const existing = this.disconnectCooldowns.get(campaignId);
+    if (!existing) {
+      return;
+    }
+    clearTimeout(existing.timeout);
+    if (existing.interval) {
+      clearInterval(existing.interval);
+    }
+    this.disconnectCooldowns.delete(campaignId);
+  }
+
+  private async addAnyConnectedSessionsToPool(
+    campaignId: string,
+    pool: Pool,
+    reason: string
+  ): Promise<string[]> {
+    if (!Array.isArray(pool.sessionIds)) {
+      pool.sessionIds = [];
+    }
+    const connected = this.getAllConnectedSessions();
+    const candidates = connected.filter((id) => !pool.sessionIds.includes(id));
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    return this.addSessionsToPool(campaignId, pool, candidates, reason);
+  }
+
+  private async refreshPoolDuringDisconnectPause(campaignId: string): Promise<void> {
+    const campaign = await storage.getCampaign(campaignId);
+    if (!campaign || campaign.status !== "paused" || !campaign.poolId) {
+      this.clearDisconnectCooldown(campaignId);
+      return;
+    }
+
+    const pool = await storage.getPool(campaign.poolId);
+    if (!pool) {
+      this.clearDisconnectCooldown(campaignId);
+      return;
+    }
+
+    await this.addAnyConnectedSessionsToPool(
+      campaignId,
+      pool,
+      "session_disconnect_cooldown"
+    );
+  }
+
+  private async resumePausedCampaign(campaign: Campaign): Promise<void> {
+    try {
+      await this.startCampaign(campaign.id);
+      const updated = await storage.updateCampaign(campaign.id, {
+        status: "active",
+        startedAt: campaign.startedAt ?? new Date(),
+        pausedReason: null,
+      });
+
+      if (this.io && updated) {
+        this.io.emit("campaign:started", updated);
+      }
+
+      await storage.createSystemLog({
+        level: "info",
+        source: "campaign",
+        message: `Campaign resumed after disconnect cooldown: ${campaign.name}`,
+        metadata: { campaignId: campaign.id },
+      });
+    } catch (error: any) {
+      await storage.createSystemLog({
+        level: "error",
+        source: "campaign",
+        message: `Failed to resume campaign after disconnect cooldown: ${campaign.name}`,
+        metadata: {
+          campaignId: campaign.id,
+          error: error?.message ?? String(error),
+        },
+      });
+
+      this.startDisconnectCooldown(campaign.id);
+    }
+  }
+
+  private startDisconnectCooldown(campaignId: string) {
+    this.clearDisconnectCooldown(campaignId);
+    const pauseMs = this.getDisconnectPauseMs();
+    const until = Date.now() + pauseMs;
+
+    if (this.io) {
+      this.io.emit("campaign:cooldown", {
+        campaignId,
+        reason: "session_disconnected",
+        cooldownMs: pauseMs,
+      });
+    }
+
+    const interval = setInterval(() => {
+      void this.refreshPoolDuringDisconnectPause(campaignId);
+    }, this.disconnectRefillIntervalMs);
+
+    const timeout = setTimeout(() => {
+      void this.handleDisconnectCooldownElapsed(campaignId);
+    }, pauseMs);
+
+    this.disconnectCooldowns.set(campaignId, { timeout, interval, until });
+  }
+
+  private async handleDisconnectCooldownElapsed(campaignId: string): Promise<void> {
+    const campaign = await storage.getCampaign(campaignId);
+    if (!campaign || campaign.status !== "paused" || !campaign.poolId) {
+      this.clearDisconnectCooldown(campaignId);
+      return;
+    }
+
+    const pool = await storage.getPool(campaign.poolId);
+    if (!pool) {
+      this.clearDisconnectCooldown(campaignId);
+      return;
+    }
+
+    await this.addAnyConnectedSessionsToPool(
+      campaignId,
+      pool,
+      "session_disconnect_cooldown_end"
+    );
+
+    const connected = this.getConnectedSessions(pool);
+    if (connected.length > 0) {
+      this.clearDisconnectCooldown(campaignId);
+      await this.resumePausedCampaign(campaign);
+      return;
+    }
+
+    const pauseMinutes = Math.round(this.getDisconnectPauseMs() / 60000);
+    await storage.createSystemLog({
+      level: "warning",
+      source: "campaign",
+      message: `No connected sessions after disconnect cooldown. Retrying in ${pauseMinutes} minutes.`,
+      metadata: { campaignId, poolId: pool.id, pauseMinutes },
+    });
+
+    this.startDisconnectCooldown(campaignId);
+  }
+
+  async handleSessionDisconnected(sessionId: string, reason: string): Promise<void> {
+    const activeIds = Array.from(this.activeCampaigns.entries())
+      .filter(([, active]) => active)
+      .map(([id]) => id);
+
+    if (activeIds.length === 0) {
+      return;
+    }
+
+    for (const campaignId of activeIds) {
+      const campaign = await storage.getCampaign(campaignId);
+      if (!campaign || campaign.status !== "active" || !campaign.poolId) {
+        continue;
+      }
+
+      const pool = await storage.getPool(campaign.poolId);
+      if (!pool || !pool.sessionIds?.includes(sessionId)) {
+        continue;
+      }
+
+      await this.removeSessionFromPool(
+        campaignId,
+        pool,
+        sessionId,
+        "session_disconnected"
+      );
+
+      await this.stopCampaign(campaignId, "session_disconnected");
+
+      await storage.createSystemLog({
+        level: "warning",
+        source: "campaign",
+        message: `Campaign paused due to session disconnect (${sessionId})`,
+        metadata: {
+          campaignId,
+          poolId: pool.id,
+          sessionId,
+          reason,
+        },
+      });
+
+      await this.addAnyConnectedSessionsToPool(
+        campaignId,
+        pool,
+        "session_disconnect_pause"
+      );
+
+      this.startDisconnectCooldown(campaignId);
+    }
   }
 
   private parseBooleanEnv(value: string | undefined): boolean | null {
@@ -234,6 +434,14 @@ class CampaignEngine {
       return envValue;
     }
     return true;
+  }
+
+  private getDisconnectPauseMs(): number {
+    const minutes = this.parsePositiveIntEnv(process.env.CAMPAIGN_DISCONNECT_PAUSE_MINUTES);
+    if (minutes !== null) {
+      return minutes * 60 * 1000;
+    }
+    return 10 * 60 * 1000;
   }
 
   getCampaignPauseSettings() {
@@ -717,18 +925,21 @@ class CampaignEngine {
     });
   }
 
-  async stopCampaign(campaignId: string): Promise<void> {
+  async stopCampaign(campaignId: string, reason: string = "manual"): Promise<void> {
     this.activeCampaigns.delete(campaignId);
     
     await storage.updateCampaign(campaignId, {
-      status: 'paused'
+      status: 'paused',
+      pausedReason: reason,
     });
+
+    await storage.resetDebtorsForCampaign(campaignId, ["procesando"]);
 
     await storage.createSystemLog({
       level: 'info',
       source: 'campaign',
       message: `Campaign paused: ${campaignId}`,
-      metadata: { campaignId }
+      metadata: { campaignId, reason }
     });
   }
 
@@ -744,11 +955,12 @@ class CampaignEngine {
 
     // Only process debtors that belong to this specific campaign.
     // If none are assigned, claim available "orphan" debtors (campaignId: null).
-    let allDebtors = await storage.getDebtors(campaignId);
+    let allDebtors = await storage.getDebtors(campaignId, campaign.ownerUserId ?? undefined);
     if (allDebtors.length === 0) {
       const claimed = await storage.assignAvailableOrphanDebtorsToCampaign(
         campaignId,
-        debtorRange ? { start: debtorRange.start, end: debtorRange.end } : undefined
+        debtorRange ? { start: debtorRange.start, end: debtorRange.end } : undefined,
+        campaign.ownerUserId ?? undefined
       );
       if (claimed > 0) {
         claimedWithRange = !!debtorRange;
@@ -762,11 +974,11 @@ class CampaignEngine {
             debtorRange: debtorRange ?? null,
           },
         });
-        allDebtors = await storage.getDebtors(campaignId);
+        allDebtors = await storage.getDebtors(campaignId, campaign.ownerUserId ?? undefined);
       } else {
         const released = await storage.releaseDebtorsByStatusFromInactiveCampaigns([
           "disponible",
-        ]);
+        ], campaign.ownerUserId ?? undefined);
         if (released > 0) {
           await storage.createSystemLog({
             level: "info",
@@ -777,7 +989,8 @@ class CampaignEngine {
 
           const reclaimed = await storage.assignAvailableOrphanDebtorsToCampaign(
             campaignId,
-            debtorRange ? { start: debtorRange.start, end: debtorRange.end } : undefined
+            debtorRange ? { start: debtorRange.start, end: debtorRange.end } : undefined,
+            campaign.ownerUserId ?? undefined
           );
           if (reclaimed > 0) {
             claimedWithRange = !!debtorRange;
@@ -791,7 +1004,7 @@ class CampaignEngine {
                 debtorRange: debtorRange ?? null,
               },
             });
-            allDebtors = await storage.getDebtors(campaignId);
+            allDebtors = await storage.getDebtors(campaignId, campaign.ownerUserId ?? undefined);
           }
         }
       }
@@ -894,20 +1107,8 @@ class CampaignEngine {
         );
         if (!hasSessions) {
           if (!smsEnabled) {
-            if (this.getCampaignImmediatePauseOnNoSessions()) {
-              await this.pauseCampaignNoSessions(campaignId);
-              return;
-            }
-
-            const waited = await this.waitForAnyConnectedSessions(
-              campaignId,
-              pool,
-              "pre_send_check",
-              debtor.id
-            );
-            if (!waited) {
-              return;
-            }
+            await this.pauseCampaignNoSessions(campaignId);
+            return;
           }
 
           await storage.createSystemLog({
@@ -977,23 +1178,8 @@ class CampaignEngine {
 
               if (!recovered) {
                 if (!smsEnabled) {
-                  if (this.getCampaignImmediatePauseOnNoSessions()) {
-                    await this.pauseCampaignNoSessions(campaignId);
-                    return;
-                  }
-
-                  const waited = await this.waitForAnyConnectedSessions(
-                    campaignId,
-                    pool,
-                    "no_connected_sessions",
-                    debtor.id
-                  );
-                  if (!waited) {
-                    return;
-                  }
-
-                  attemptedSessionIds.length = 0;
-                  continue;
+                  await this.pauseCampaignNoSessions(campaignId);
+                  return;
                 }
 
                 await storage.createSystemLog({
@@ -1041,9 +1227,10 @@ class CampaignEngine {
           channelUsed = "whatsapp";
 
           try {
-            const success = await this.sendMessage(nextSessionId, debtor, personalizedMessage);
-            if (success) {
+            const result = await this.sendMessage(nextSessionId, debtor, personalizedMessage);
+            if (result.success) {
               sendSucceeded = true;
+              providerResponse = result.messageId ?? null;
               break;
             }
             lastError = new Error("Failed to send message");
@@ -1071,23 +1258,8 @@ class CampaignEngine {
               );
               if (!recovered) {
                 if (!smsEnabled) {
-                  if (this.getCampaignImmediatePauseOnNoSessions()) {
-                    await this.pauseCampaignNoSessions(campaignId);
-                    return;
-                  }
-
-                  const waited = await this.waitForAnyConnectedSessions(
-                    campaignId,
-                    pool,
-                    "session_unavailable",
-                    debtor.id
-                  );
-                  if (!waited) {
-                    return;
-                  }
-
-                  attemptedSessionIds.length = 0;
-                  continue;
+                  await this.pauseCampaignNoSessions(campaignId);
+                  return;
                 }
 
                 await storage.createSystemLog({
@@ -1134,23 +1306,8 @@ class CampaignEngine {
               );
               if (!recovered) {
                 if (!smsEnabled) {
-                  if (this.getCampaignImmediatePauseOnNoSessions()) {
-                    await this.pauseCampaignNoSessions(campaignId);
-                    return;
-                  }
-
-                  const waited = await this.waitForAnyConnectedSessions(
-                    campaignId,
-                    pool,
-                    "session_unavailable_no_remaining",
-                    debtor.id
-                  );
-                  if (!waited) {
-                    return;
-                  }
-
-                  attemptedSessionIds.length = 0;
-                  continue;
+                  await this.pauseCampaignNoSessions(campaignId);
+                  return;
                 }
 
                 await storage.createSystemLog({
@@ -1415,18 +1572,30 @@ class CampaignEngine {
       }
     }
 
+    if (!this.activeCampaigns.get(campaignId)) {
+      this.activeCampaigns.delete(campaignId);
+      await storage.createSystemLog({
+        level: "info",
+        source: "campaign",
+        message: `Campaign stopped before completion: ${campaign.name}`,
+        metadata: { campaignId },
+      });
+      return;
+    }
+
     await storage.updateCampaign(campaignId, {
-      status: 'completed',
-      completedAt: new Date()
+      status: "completed",
+      completedAt: new Date(),
+      pausedReason: null,
     });
 
     this.activeCampaigns.delete(campaignId);
 
     await storage.createSystemLog({
-      level: 'info',
-      source: 'campaign',
+      level: "info",
+      source: "campaign",
       message: `Campaign completed: ${campaign.name}`,
-      metadata: { campaignId }
+      metadata: { campaignId },
     });
   }
 
@@ -1458,12 +1627,14 @@ class CampaignEngine {
   }
 
   private getConnectedSessions(pool: Pool): string[] {
-    const connectedInMemory = whatsappManager.getConnectedSessionIds();
+    const connectedInMemory = whatsappManager.getVerifiedConnectedSessionIdsWithOptions({
+      includeNotify: false,
+    });
     return pool.sessionIds.filter(id => connectedInMemory.includes(id));
   }
 
   private getAllConnectedSessions(): string[] {
-    return whatsappManager.getConnectedSessionIds();
+    return whatsappManager.getVerifiedConnectedSessionIdsWithOptions({ includeNotify: false });
   }
 
   private async removeSessionFromPool(
@@ -1481,6 +1652,10 @@ class CampaignEngine {
 
     if (this.getCampaignPoolAutoAdjust()) {
       await storage.updatePool(pool.id, { sessionIds: pool.sessionIds });
+    }
+
+    if (this.io) {
+      this.io.emit("pool:updated", { poolId: pool.id });
     }
 
     await storage.createSystemLog({
@@ -1518,6 +1693,10 @@ class CampaignEngine {
 
     if (this.getCampaignPoolAutoAdjust()) {
       await storage.updatePool(pool.id, { sessionIds: pool.sessionIds });
+    }
+
+    if (this.io) {
+      this.io.emit("pool:updated", { poolId: pool.id });
     }
 
     await storage.createSystemLog({
@@ -1600,7 +1779,7 @@ class CampaignEngine {
     await storage.createSystemLog({
       level: "warn",
       source: "campaign",
-      message: "Waiting for connected WhatsApp sessions (no auto-reconnect).",
+      message: "Waiting for VERIFIED connected WhatsApp sessions",
       metadata: {
         campaignId,
         poolId: pool.id,
@@ -1695,15 +1874,11 @@ class CampaignEngine {
     await storage.createSystemLog({
       level: "error",
       source: "campaign",
-      message: "No connected sessions available. Pausing campaign.",
+      message: "Waiting for VERIFIED connected WhatsApp sessions",
       metadata: { campaignId },
     });
 
-    await storage.updateCampaign(campaignId, {
-      status: "paused",
-    });
-
-    this.activeCampaigns.delete(campaignId);
+    await this.stopCampaign(campaignId, "no_sessions");
 
     if (this.io) {
       this.io.emit("campaign:error", {
@@ -1721,11 +1896,7 @@ class CampaignEngine {
       metadata: { campaignId },
     });
 
-    await storage.updateCampaign(campaignId, {
-      status: "paused",
-    });
-
-    this.activeCampaigns.delete(campaignId);
+    await this.stopCampaign(campaignId, "no_gsm_lines");
 
     if (this.io) {
       this.io.emit("campaign:error", {
@@ -1854,9 +2025,17 @@ class CampaignEngine {
     return this.calculateDelayFromValues(scaledBase, scaledVariation);
   }
 
-  private async sendMessage(sessionId: string, debtor: Debtor, messageText: string): Promise<boolean> {
+  private async sendMessage(
+    sessionId: string,
+    debtor: Debtor,
+    messageText: string
+  ): Promise<{ success: boolean; messageId?: string }> {
     try {
-      await whatsappManager.sendMessage(sessionId, debtor.phone, messageText);
+      const result = await whatsappManager.sendMessage(
+        sessionId,
+        debtor.phone,
+        messageText
+      );
       
       await storage.createSystemLog({
         level: 'info',
@@ -1865,7 +2044,7 @@ class CampaignEngine {
         metadata: { debtorId: debtor.id, sessionId }
       });
 
-      return true;
+      return { success: true, messageId: result.messageId };
     } catch (error: any) {
       const retryable = this.isSessionUnavailableError(error);
       await storage.createSystemLog({
@@ -1886,7 +2065,7 @@ class CampaignEngine {
         throw wrapped;
       }
 
-      return false;
+      return { success: false };
     }
   }
 
@@ -1896,3 +2075,7 @@ class CampaignEngine {
 }
 
 export const campaignEngine = new CampaignEngine();
+
+whatsappManager.setSessionDisconnectHandler((sessionId, reason) => {
+  void campaignEngine.handleSessionDisconnected(sessionId, reason);
+});

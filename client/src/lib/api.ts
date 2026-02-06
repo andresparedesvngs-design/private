@@ -25,7 +25,10 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-    throw new Error(error.error || 'Request failed');
+    const message = error?.message || error?.error || 'Request failed';
+    const err = new Error(message);
+    (err as any).response = { data: error };
+    throw err;
   }
 
   if (response.status === 204) {
@@ -36,8 +39,15 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
 }
 
 export type AuthMe = {
+  id: string;
   username: string;
   role: string;
+  displayName?: string | null;
+  executivePhone?: string | null;
+  notifyEnabled?: boolean;
+  notifyBatchWindowSec?: number;
+  notifyBatchMaxItems?: number;
+  permissions?: string[];
 };
 
 export type CampaignWindowSettings = {
@@ -68,6 +78,55 @@ export type WhatsAppPollingSettings = {
   activePollingSessions: number;
 };
 
+export type SessionHealthSnapshot = {
+  sessionId: string;
+  phoneNumber: string | null;
+  status: string;
+  verifiedConnected: boolean;
+  lastVerifiedAt: string | null;
+  lastVerifyError: string | null;
+  lastActive: string | null;
+  messagesSent: number;
+};
+
+export type VerifyNowResult = {
+  checked: number;
+  verified: number;
+  failed: number;
+  results: Array<{
+    sessionId: string;
+    phoneNumber: string | null;
+    verifiedConnected: boolean;
+    error?: string;
+  }>;
+};
+
+export type WhatsAppVerificationBatch = {
+  id: string;
+  poolId?: string | null;
+  requestedBy?: string | null;
+  total: number;
+  verified: number;
+  failed: number;
+  status: "running" | "completed";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WhatsAppVerificationResult = {
+  id: string;
+  batchId: string;
+  poolId?: string | null;
+  rut?: string | null;
+  phone: string;
+  whatsapp: boolean;
+  waId?: string | null;
+  verifiedBy?: string | null;
+  verifiedAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export function useAuthMe() {
   return useQuery({
     queryKey: ['auth', 'me'],
@@ -82,7 +141,10 @@ export function useAuthMe() {
 
       if (!response.ok) {
         const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(error.error || 'Request failed');
+        const message = error?.message || error?.error || 'Request failed';
+        const err = new Error(message);
+        (err as any).response = { data: error };
+        throw err;
       }
 
       return response.json() as Promise<AuthMe>;
@@ -100,8 +162,9 @@ export function useLogin() {
         method: 'POST',
         body: JSON.stringify({ username, password }),
       }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['auth', 'me'] });
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['auth', 'me'] });
+      await queryClient.refetchQueries({ queryKey: ['auth', 'me'] });
     },
   });
 }
@@ -116,6 +179,140 @@ export function useLogout() {
       }),
     onSuccess: () => {
       queryClient.setQueryData(['auth', 'me'], null);
+    },
+  });
+}
+
+export type AdminUser = {
+  id: string;
+  username: string;
+  role: string;
+  active: boolean;
+  displayName?: string | null;
+  executivePhone?: string | null;
+  permissions?: string[];
+  notifyEnabled?: boolean;
+  notifyBatchWindowSec?: number;
+  notifyBatchMaxItems?: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type ExecutiveOption = {
+  id: string;
+  username: string;
+  displayName?: string | null;
+  executivePhone?: string | null;
+  active: boolean;
+};
+
+export function useUsers(enabled: boolean = true) {
+  return useQuery({
+    queryKey: ["users"],
+    queryFn: () => fetchApi<AdminUser[]>("/users"),
+    enabled,
+  });
+}
+
+export function useExecutives(enabled: boolean = true) {
+  return useQuery({
+    queryKey: ["users", "executives"],
+    queryFn: () => fetchApi<ExecutiveOption[]>("/users/executives"),
+    enabled,
+  });
+}
+
+export function useCreateUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: {
+      username: string;
+      password: string;
+      role?: "admin" | "supervisor" | "executive";
+      active?: boolean;
+      displayName?: string | null;
+      executivePhone?: string | null;
+      permissions?: string[];
+      notifyEnabled?: boolean;
+      notifyBatchWindowSec?: number;
+      notifyBatchMaxItems?: number;
+    }) =>
+      fetchApi<AdminUser>("/users", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
+export function useUpdateUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: {
+      id: string;
+      data: {
+        active?: boolean;
+        role?: "admin" | "supervisor" | "executive";
+        displayName?: string | null;
+        executivePhone?: string | null;
+      };
+    }) =>
+      fetchApi<AdminUser>(`/users/${payload.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload.data),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
+export function useResetUserPassword() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { id: string; password: string }) =>
+      fetchApi<{ success: boolean }>(`/users/${payload.id}/reset-password`, {
+        method: "POST",
+        body: JSON.stringify({ password: payload.password }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
+export function useUpdateUserPermissions() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { id: string; permissions: string[] }) =>
+      fetchApi<AdminUser>(`/users/${payload.id}/permissions`, {
+        method: "PATCH",
+        body: JSON.stringify({ permissions: payload.permissions }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
+export function useUpdateMyProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: {
+      displayName?: string | null;
+      executivePhone?: string | null;
+      notifyEnabled?: boolean;
+      notifyBatchWindowSec?: number;
+      notifyBatchMaxItems?: number;
+    }) =>
+      fetchApi<AuthMe>("/users/me", {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
     },
   });
 }
@@ -135,11 +332,20 @@ export function useDashboardStats() {
   });
 }
 
-export function useSessions() {
+export function useSessions(enabled: boolean = true) {
   return useQuery({
     queryKey: ['sessions'],
     queryFn: () => fetchApi<Session[]>('/sessions'),
     refetchInterval: 3000,
+    enabled,
+  });
+}
+
+export function useSessionsHealth(enabled: boolean = true) {
+  return useQuery({
+    queryKey: ['sessions', 'health'],
+    queryFn: () => fetchApi<SessionHealthSnapshot[]>('/sessions/health'),
+    enabled,
   });
 }
 
@@ -221,10 +427,95 @@ export function useEnableSessionQr() {
   });
 }
 
-export function usePools() {
+export function useVerifySessionsNow() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () =>
+      fetchApi<VerifyNowResult>('/sessions/verify-now', {
+        method: 'POST',
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      queryClient.invalidateQueries({ queryKey: ['sessions', 'health'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
+export function useVerifyDebtorsWhatsApp() {
+  return useMutation({
+    mutationFn: ({
+      poolId,
+      debtors,
+      batchId,
+      complete,
+      persist,
+    }: {
+      poolId: string;
+      debtors: Array<{ rut?: string | null; phone: string }>;
+      batchId?: string;
+      complete?: boolean;
+      persist?: boolean;
+    }) =>
+      fetchApi<{
+        batchId: string | null;
+        checked: number;
+        verified: number;
+        failed: number;
+        results: Array<{
+          rut: string | null;
+          phone: string;
+          whatsapp: boolean;
+          wa_id: string | null;
+          verifiedBy: string | null;
+          verifiedAt: string;
+        }>;
+      }>(`/pools/${poolId}/verify-debtors`, {
+        method: "POST",
+        body: JSON.stringify({
+          debtors,
+          batchId,
+          complete,
+          persist,
+        }),
+      }),
+  });
+}
+
+export function useWhatsAppVerificationBatches(enabled: boolean = true, limit = 20) {
+  return useQuery({
+    queryKey: ["whatsapp", "verifications", "batches", limit],
+    queryFn: () =>
+      fetchApi<WhatsAppVerificationBatch[]>(
+        `/whatsapp-verifications/batches?limit=${limit}`
+      ),
+    enabled,
+  });
+}
+
+export function useWhatsAppVerificationResults(
+  batchId: string | null,
+  options?: { limit?: number; skip?: number; enabled?: boolean }
+) {
+  const limit = options?.limit ?? 0;
+  const skip = options?.skip ?? 0;
+  const enabled = options?.enabled ?? Boolean(batchId);
+  return useQuery({
+    queryKey: ["whatsapp", "verifications", batchId, limit, skip],
+    queryFn: () =>
+      fetchApi<WhatsAppVerificationResult[]>(
+        `/whatsapp-verifications/${batchId}?limit=${limit}&skip=${skip}`
+      ),
+    enabled,
+  });
+}
+
+export function usePools(enabled: boolean = true) {
   return useQuery({
     queryKey: ['pools'],
     queryFn: () => fetchApi<Pool[]>('/pools'),
+    enabled,
   });
 }
 
@@ -278,10 +569,11 @@ export function useDeletePool() {
   });
 }
 
-export function useGsmLines() {
+export function useGsmLines(enabled: boolean = true) {
   return useQuery({
     queryKey: ['gsm-lines'],
     queryFn: () => fetchApi<GsmLine[]>('/gsm-lines'),
+    enabled,
   });
 }
 
@@ -340,10 +632,11 @@ export function useDeleteGsmLine() {
   });
 }
 
-export function useGsmPools() {
+export function useGsmPools(enabled: boolean = true) {
   return useQuery({
     queryKey: ['gsm-pools'],
     queryFn: () => fetchApi<GsmPool[]>('/gsm-pools'),
+    enabled,
   });
 }
 
@@ -518,10 +811,11 @@ export function useUpdateContact() {
   });
 }
 
-export function useCampaignWindowSettings() {
+export function useCampaignWindowSettings(enabled: boolean = true) {
   return useQuery({
     queryKey: ['settings', 'campaign-window'],
     queryFn: () => fetchApi<CampaignWindowSettings>('/settings/campaign-window'),
+    enabled,
   });
 }
 
@@ -539,10 +833,11 @@ export function useUpdateCampaignWindowSettings() {
   });
 }
 
-export function useCampaignPauseSettings() {
+export function useCampaignPauseSettings(enabled: boolean = true) {
   return useQuery({
     queryKey: ['settings', 'campaign-pauses'],
     queryFn: () => fetchApi<CampaignPauseSettings>('/settings/campaign-pauses'),
+    enabled,
   });
 }
 
@@ -599,6 +894,34 @@ export function useCreateDebtorsBulk() {
 }
 
 export const useBulkCreateDebtors = useCreateDebtorsBulk;
+
+export function useAssignDebtor() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ownerUserId }: { id: string; ownerUserId: string }) =>
+      fetchApi<Debtor>(`/debtors/${id}/assign`, {
+        method: "PATCH",
+        body: JSON.stringify({ ownerUserId }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["debtors"] });
+    },
+  });
+}
+
+export function useAssignDebtorsBulk() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { debtorIds: string[]; ownerUserId: string }) =>
+      fetchApi<{ success: boolean; count: number }>("/debtors/assign-bulk", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["debtors"] });
+    },
+  });
+}
 
 export function useUpdateDebtor() {
   const queryClient = useQueryClient();
@@ -696,6 +1019,9 @@ export function useMessages(campaignId?: string, enabled: boolean = true) {
     queryKey: ['messages', campaignId],
     queryFn: () => fetchApi<Message[]>(`/messages${campaignId ? `?campaignId=${campaignId}` : ''}`),
     enabled,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -746,11 +1072,12 @@ export function useDeleteConversation() {
   });
 }
 
-export function useSystemLogs(limit = 100) {
+export function useSystemLogs(limit = 100, enabled: boolean = true) {
   return useQuery({
     queryKey: ['logs', limit],
     queryFn: () => fetchApi<SystemLog[]>(`/logs?limit=${limit}`),
     refetchInterval: 5000,
+    enabled,
   });
 }
 
@@ -769,11 +1096,12 @@ export function useRetryFailedCampaign() {
   });
 }
 
-export function useWhatsAppPollingSettings() {
+export function useWhatsAppPollingSettings(enabled: boolean = true) {
   return useQuery({
     queryKey: ['settings', 'whatsapp-polling'],
     queryFn: () => fetchApi<WhatsAppPollingSettings>('/settings/whatsapp-polling'),
     refetchInterval: 5000,
+    enabled,
   });
 }
 

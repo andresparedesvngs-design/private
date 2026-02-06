@@ -2,12 +2,22 @@ import Layout from "@/components/layout/Layout";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { AlertTriangle, Info, Loader2 } from "lucide-react";
-import { useSystemLogs } from "@/lib/api";
+import { useAuthMe, useSystemLogs } from "@/lib/api";
 
 type LogLevel = 'info' | 'error' | 'warning';
 
 export default function SystemLogs() {
-  const { data: logs, isLoading } = useSystemLogs(100);
+  const { data: user } = useAuthMe();
+  const canViewLogs = user?.role === "admin" || user?.role === "supervisor";
+  const { data: logs, isLoading } = useSystemLogs(100, canViewLogs);
+
+  if (!canViewLogs) {
+    return (
+      <Layout>
+        <Card className="p-6 text-sm text-muted-foreground">No autorizado.</Card>
+      </Layout>
+    );
+  }
 
   const getIcon = (level: LogLevel) => {
     switch (level) {

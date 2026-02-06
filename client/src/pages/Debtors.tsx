@@ -29,7 +29,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
+  useAuthMe,
   useDebtors,
   useDeleteDebtor,
   useCreateDebtor,
@@ -37,12 +39,20 @@ import {
   useResetDebtors,
   useCleanupDebtors,
   useReleaseDebtors,
+  useExecutives,
+  useAssignDebtorsBulk,
+  usePools,
+  useVerifyDebtorsWhatsApp,
+  useWhatsAppVerificationBatches,
 } from "@/lib/api";
 import type { Debtor } from "@shared/schema";
 import { useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
 export default function Debtors() {
+  const { data: user } = useAuthMe();
+  const isExecutive = user?.role === "executive";
+  const isSupervisorOrAdmin = user?.role === "supervisor" || user?.role === "admin";
   const { data: debtors, isLoading } = useDebtors();
   const deleteDebtor = useDeleteDebtor();
   const createDebtor = useCreateDebtor();
@@ -50,6 +60,12 @@ export default function Debtors() {
   const resetDebtors = useResetDebtors();
   const cleanupDebtors = useCleanupDebtors();
   const releaseDebtors = useReleaseDebtors();
+  const assignDebtorsBulk = useAssignDebtorsBulk();
+  const { data: executives } = useExecutives(isSupervisorOrAdmin);
+  const { data: pools } = usePools(isSupervisorOrAdmin);
+  const verifyDebtorsWhatsApp = useVerifyDebtorsWhatsApp();
+  const { data: verificationBatches, refetch: refetchVerificationBatches } =
+    useWhatsAppVerificationBatches(isSupervisorOrAdmin, 20);
   
   const [searchQuery, setSearchQuery] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -58,12 +74,49 @@ export default function Debtors() {
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
   const [newDebt, setNewDebt] = useState("");
+  const [selectedDebtorIds, setSelectedDebtorIds] = useState<string[]>([]);
+  const [selectedExecutiveId, setSelectedExecutiveId] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const verifyFileInputRef = useRef<HTMLInputElement>(null);
+  const [verifyPoolId, setVerifyPoolId] = useState<string>("");
+  const [verifyFileName, setVerifyFileName] = useState<string>("");
+  const [verifyTargets, setVerifyTargets] = useState<Array<{ rut?: string | null; phone: string }>>([]);
+  const [verifyBatchId, setVerifyBatchId] = useState<string | null>(null);
+  const [verifyPreview, setVerifyPreview] = useState<
+    Array<{
+      rut: string | null;
+      phone: string;
+      whatsapp: boolean;
+      wa_id: string | null;
+      verifiedBy: string | null;
+      verifiedAt: string;
+    }>
+  >([]);
+  const [verifyProgress, setVerifyProgress] = useState({ processed: 0, total: 0 });
+  const [verifySummary, setVerifySummary] = useState({ verified: 0, failed: 0 });
+  const [verifyRunning, setVerifyRunning] = useState(false);
   
   const filteredDebtors = debtors?.filter(d => 
     d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     d.phone.includes(searchQuery)
   ) || [];
+  const allSelected = filteredDebtors.length > 0 && selectedDebtorIds.length === filteredDebtors.length;
+  const isIndeterminate =
+    selectedDebtorIds.length > 0 && selectedDebtorIds.length < filteredDebtors.length;
+
+  const toggleDebtorSelection = (id: string, checked: boolean) => {
+    setSelectedDebtorIds((prev) =>
+      checked ? [...prev, id] : prev.filter((item) => item !== id)
+    );
+  };
+
+  const toggleSelectAll = (checked: boolean) => {
+    if (!checked) {
+      setSelectedDebtorIds([]);
+      return;
+    }
+    setSelectedDebtorIds(filteredDebtors.map((debtor) => debtor.id));
+  };
 
   const debtorStatusOptions = [
     { value: "disponible", label: "Disponibles" },
@@ -87,6 +140,14 @@ export default function Debtors() {
     }
     return counts;
   }, [debtors]);
+
+  const executiveById = useMemo(() => {
+    const map = new Map<string, { label: string }>();
+    for (const exec of executives ?? []) {
+      map.set(exec.id, { label: exec.displayName || exec.username });
+    }
+    return map;
+  }, [executives]);
 
   const toggleStatusInList = (current: string[], status: string) =>
     current.includes(status)
@@ -279,6 +340,96 @@ export default function Debtors() {
 
     cells.push(current.trim());
     return cells;
+  };
+
+  const verifyHeaderVariants = {
+    phone: [
+      "telefono",
+      "teléfono",
+      "phone",
+      "celular",
+      "movil",
+      "móvil",
+      "mobile",
+      "whatsapp",
+      "numero",
+      "número",
+      "phone number",
+      "phone_number",
+    ],
+    rut: ["rut", "documento", "documento id", "id", "dni"],
+  } as const;
+
+  const findVerifyHeaderIndex = (headersNormalized: string[], variants: string[]) => {
+    const normalizedVariants = variants.map(normalizeHeader);
+    return headersNormalized.findIndex((header) =>
+      normalizedVariants.some(
+        (variant) =>
+          header === variant ||
+          header.includes(variant) ||
+          variant.includes(header)
+      )
+    );
+  };
+
+  const parseVerificationCsv = (text: string) => {
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length === 0) {
+      return [];
+    }
+
+    let headerLineIndex = 0;
+    if (/^sep\s*=/i.test(lines[0])) {
+      headerLineIndex = 1;
+    }
+    const headerLine = lines[headerLineIndex] ?? "";
+    const delimiter = detectDelimiter(headerLine);
+    const headerCells = parseCsvLine(headerLine, delimiter);
+    const headersNormalized = headerCells.map(normalizeHeader);
+    const phoneIndex = findVerifyHeaderIndex(headersNormalized, [...verifyHeaderVariants.phone]);
+    const rutIndex = findVerifyHeaderIndex(headersNormalized, [...verifyHeaderVariants.rut]);
+
+    if (phoneIndex === -1) {
+      throw new Error("No se encontró columna de teléfono");
+    }
+
+    const results: Array<{ rut?: string | null; phone: string }> = [];
+    for (let i = headerLineIndex + 1; i < lines.length; i++) {
+      const cells = parseCsvLine(lines[i], delimiter);
+      const phoneRaw = cells[phoneIndex]?.trim();
+      if (!phoneRaw) continue;
+      const phone = normalizePhoneValue(phoneRaw);
+      if (!phone) continue;
+      const rut = rutIndex >= 0 ? cells[rutIndex]?.trim() : "";
+      results.push({ rut: rut || null, phone });
+    }
+    return results;
+  };
+
+  const readVerificationFile = async (file: File) => {
+    const isExcelFile = /\.(xlsx|xls)$/i.test(file.name);
+    if (isExcelFile) {
+      const arrayBuffer = await file.arrayBuffer();
+      const workbook = XLSX.read(arrayBuffer, { type: "array" });
+      const firstSheetName = workbook.SheetNames[0];
+      const firstSheet = workbook.Sheets[firstSheetName];
+      const csvText = XLSX.utils.sheet_to_csv(firstSheet);
+      return parseVerificationCsv(csvText);
+    }
+
+    const text = await file.text();
+    return parseVerificationCsv(text);
+  };
+
+  const chunkArray = <T,>(items: T[], chunkSize: number): T[][] => {
+    const chunks: T[][] = [];
+    for (let i = 0; i < items.length; i += chunkSize) {
+      chunks.push(items.slice(i, i + chunkSize));
+    }
+    return chunks;
   };
 
   const headerVariants: Record<
@@ -616,6 +767,129 @@ export default function Debtors() {
     }
   };
 
+  const handleVerifyFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const targets = await readVerificationFile(file);
+      if (targets.length === 0) {
+        alert("No se encontraron filas válidas para verificación");
+        return;
+      }
+      setVerifyFileName(file.name);
+      setVerifyTargets(targets);
+      setVerifyBatchId(null);
+      setVerifyPreview([]);
+      setVerifySummary({ verified: 0, failed: 0 });
+      setVerifyProgress({ processed: 0, total: targets.length });
+    } catch (error: any) {
+      console.error("Failed to parse verification file:", error);
+      alert(error?.message ?? "Error al leer el archivo");
+    } finally {
+      if (verifyFileInputRef.current) {
+        verifyFileInputRef.current.value = "";
+      }
+    }
+  };
+
+  const handleStartVerification = async () => {
+    if (!verifyPoolId) {
+      alert("Selecciona un pool para verificar");
+      return;
+    }
+    if (!verifyTargets.length) {
+      alert("Carga una lista de números primero");
+      return;
+    }
+    if (verifyRunning) {
+      return;
+    }
+
+    const chunkSize = 200;
+    const chunks = chunkArray(verifyTargets, chunkSize);
+    let batchId: string | null = null;
+
+    setVerifyRunning(true);
+    setVerifyPreview([]);
+    setVerifySummary({ verified: 0, failed: 0 });
+    setVerifyProgress({ processed: 0, total: verifyTargets.length });
+
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        const isLast = i === chunks.length - 1;
+        const response = await verifyDebtorsWhatsApp.mutateAsync({
+          poolId: verifyPoolId,
+          debtors: chunks[i],
+          batchId: batchId ?? undefined,
+          complete: isLast,
+          persist: true,
+        });
+
+        if (response.batchId) {
+          batchId = response.batchId;
+        }
+
+        const nextPreview = response.results.map((item) => ({
+          rut: item.rut ?? null,
+          phone: item.phone,
+          whatsapp: item.whatsapp,
+          wa_id: item.wa_id ?? null,
+          verifiedBy: item.verifiedBy ?? null,
+          verifiedAt: item.verifiedAt,
+        }));
+
+        setVerifyPreview((prev) => {
+          const combined = [...prev, ...nextPreview];
+          return combined.slice(0, 200);
+        });
+
+        setVerifyProgress((prev) => ({
+          processed: Math.min(prev.processed + response.checked, verifyTargets.length),
+          total: prev.total,
+        }));
+
+        setVerifySummary((prev) => ({
+          verified: prev.verified + response.verified,
+          failed: prev.failed + response.failed,
+        }));
+      }
+
+      setVerifyBatchId(batchId);
+      await refetchVerificationBatches();
+    } catch (error: any) {
+      console.error("Failed to verify WhatsApp numbers:", error);
+      alert(error?.message ?? "Error al verificar números");
+    } finally {
+      setVerifyRunning(false);
+    }
+  };
+
+  const handleDownloadVerificationExport = async (batchIdOverride?: string | null) => {
+    const targetBatchId = batchIdOverride ?? verifyBatchId;
+    if (!targetBatchId) return;
+    try {
+      const response = await fetch(
+        `/api/whatsapp-verifications/${targetBatchId}/export`,
+        { credentials: "include" }
+      );
+      if (!response.ok) {
+        throw new Error("No se pudo descargar el Excel");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `verificacion_whatsapp_${targetBatchId}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error: any) {
+      console.error("Failed to download verification export:", error);
+      alert(error?.message ?? "Error al descargar el Excel");
+    }
+  };
+
   const handleResetDebtors = async () => {
     const unavailable = debtors?.filter(d => d.status === 'fallado' || d.status === 'completado').length || 0;
     if (unavailable === 0) {
@@ -651,6 +925,29 @@ export default function Debtors() {
     } catch (error) {
       console.error("Failed to release available debtors:", error);
       alert("Error al liberar deudores disponibles");
+    }
+  };
+
+  const handleAssignSelected = async () => {
+    if (!selectedExecutiveId) {
+      alert("Selecciona un ejecutivo");
+      return;
+    }
+    if (selectedDebtorIds.length === 0) {
+      alert("Selecciona al menos un deudor");
+      return;
+    }
+
+    try {
+      const result = await assignDebtorsBulk.mutateAsync({
+        debtorIds: selectedDebtorIds,
+        ownerUserId: selectedExecutiveId,
+      });
+      alert(`Se asignaron ${result.count} deudores`);
+      setSelectedDebtorIds([]);
+    } catch (error) {
+      console.error("Failed to assign debtors:", error);
+      alert("Error al asignar deudores");
     }
   };
 
@@ -735,34 +1032,38 @@ export default function Debtors() {
             <p className="text-muted-foreground mt-1">Sube y administra tus listas de contactos.</p>
           </div>
           <div className="flex gap-2">
-            <Button 
-              variant="outline" 
-              className="gap-2" 
-              onClick={handleResetDebtors}
-              disabled={resetDebtors.isPending}
-              data-testid="button-reset-debtors"
-            >
-              {resetDebtors.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <RotateCcw className="h-4 w-4" />
-              )}
-              Resetear estado
-            </Button>
-            <Button
-              variant="outline"
-              className="gap-2"
-              onClick={handleReleaseAvailable}
-              disabled={releaseDebtors.isPending}
-              data-testid="button-release-available"
-            >
-              {releaseDebtors.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <RotateCcw className="h-4 w-4" />
-              )}
-              Liberar disponibles
-            </Button>
+            {isSupervisorOrAdmin && (
+              <>
+                <Button 
+                  variant="outline" 
+                  className="gap-2" 
+                  onClick={handleResetDebtors}
+                  disabled={resetDebtors.isPending}
+                  data-testid="button-reset-debtors"
+                >
+                  {resetDebtors.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RotateCcw className="h-4 w-4" />
+                  )}
+                  Resetear estado
+                </Button>
+                <Button
+                  variant="outline"
+                  className="gap-2"
+                  onClick={handleReleaseAvailable}
+                  disabled={releaseDebtors.isPending}
+                  data-testid="button-release-available"
+                >
+                  {releaseDebtors.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RotateCcw className="h-4 w-4" />
+                  )}
+                  Liberar disponibles
+                </Button>
+              </>
+            )}
             <Dialog open={isExportOpen} onOpenChange={setIsExportOpen}>
               <Button
                 variant="outline"
@@ -831,20 +1132,22 @@ export default function Debtors() {
             </Dialog>
 
             <Dialog open={isCleanupOpen} onOpenChange={setIsCleanupOpen}>
-              <Button
-                variant="outline"
-                className="gap-2 border-destructive/40 text-destructive hover:text-destructive"
-                onClick={openCleanupDialog}
-                disabled={cleanupDebtors.isPending}
-                data-testid="button-cleanup-debtors"
-              >
-                {cleanupDebtors.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Trash2 className="h-4 w-4" />
-                )}
-                Limpiar lista
-              </Button>
+              {isSupervisorOrAdmin && (
+                <Button
+                  variant="outline"
+                  className="gap-2 border-destructive/40 text-destructive hover:text-destructive"
+                  onClick={openCleanupDialog}
+                  disabled={cleanupDebtors.isPending}
+                  data-testid="button-cleanup-debtors"
+                >
+                  {cleanupDebtors.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" />
+                  )}
+                  Limpiar lista
+                </Button>
+              )}
               <DialogContent>
                 <DialogHeader>
                   <DialogTitle>Limpiar deudores</DialogTitle>
@@ -914,19 +1217,28 @@ export default function Debtors() {
               ref={fileInputRef}
               onChange={handleFileUpload}
             />
-            <Button 
-              className="gap-2 bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={bulkCreateDebtors.isPending}
-              data-testid="button-import-csv"
-            >
-              {bulkCreateDebtors.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Upload className="h-4 w-4" />
-              )}
-              Importar lista
-            </Button>
+            <input
+              type="file"
+              accept=".csv,.txt,.xlsx,.xls"
+              className="hidden"
+              ref={verifyFileInputRef}
+              onChange={handleVerifyFileUpload}
+            />
+            {isSupervisorOrAdmin && (
+              <Button 
+                className="gap-2 bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={bulkCreateDebtors.isPending}
+                data-testid="button-import-csv"
+              >
+                {bulkCreateDebtors.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Upload className="h-4 w-4" />
+                )}
+                Importar lista
+              </Button>
+            )}
             <Button
               variant="outline"
               className="gap-2"
@@ -939,20 +1251,217 @@ export default function Debtors() {
           </div>
         </div>
 
-        <Card className="border-dashed border-2 bg-muted/30 cursor-pointer hover:bg-muted/50 transition-colors" onClick={() => fileInputRef.current?.click()}>
-          <CardContent className="flex flex-col items-center justify-center py-10 gap-4">
-             <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
-               <FileSpreadsheet className="h-6 w-6 text-primary" />
-             </div>
-             <div className="text-center">
-               <h3 className="font-semibold">Importación rápida</h3>
-               <p className="text-sm text-muted-foreground">Arrastra y suelta tu archivo CSV o Excel aquí, o haz clic para seleccionar</p>
-               <p className="text-xs text-muted-foreground mt-1">
-                 Formato: nombre, teléfono, deuda (opcional), nombre ejecutivo, fono ejecutivo
-               </p>
-             </div>
-          </CardContent>
-        </Card>
+        {isSupervisorOrAdmin && (
+          <Card>
+            <CardHeader className="p-4 border-b">
+              <CardTitle className="text-base">Asignación de deudores</CardTitle>
+              <CardDescription>
+                Selecciona deudores y asigna un ejecutivo responsable.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="p-4 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div className="flex flex-col gap-2">
+                <Label className="text-xs text-muted-foreground">Ejecutivo</Label>
+                <Select value={selectedExecutiveId} onValueChange={setSelectedExecutiveId}>
+                  <SelectTrigger className="w-64">
+                    <SelectValue placeholder="Selecciona un ejecutivo" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {executives?.map((exec) => (
+                      <SelectItem key={exec.id} value={exec.id}>
+                        {exec.displayName || exec.username}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-col gap-2">
+                <span className="text-sm text-muted-foreground">
+                  Seleccionados: {selectedDebtorIds.length}
+                </span>
+                <Button
+                  onClick={handleAssignSelected}
+                  disabled={assignDebtorsBulk.isPending || selectedDebtorIds.length === 0}
+                >
+                  {assignDebtorsBulk.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  ) : null}
+                  Asignar seleccionados
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {isSupervisorOrAdmin && (
+          <Card>
+            <CardHeader className="p-4 border-b">
+              <CardTitle className="text-base">Verificación WhatsApp masiva</CardTitle>
+              <CardDescription>
+                Carga una lista de números y valida si tienen WhatsApp usando un pool.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="p-4 flex flex-col gap-4">
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="flex flex-col gap-2">
+                  <Label className="text-xs text-muted-foreground">Pool</Label>
+                  <Select value={verifyPoolId} onValueChange={setVerifyPoolId}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Selecciona un pool" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {pools?.map((pool) => (
+                        <SelectItem key={pool.id} value={pool.id}>
+                          {pool.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label className="text-xs text-muted-foreground">Archivo</Label>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      className="gap-2"
+                      onClick={() => verifyFileInputRef.current?.click()}
+                      disabled={verifyRunning}
+                    >
+                      <Upload className="h-4 w-4" />
+                      Subir archivo
+                    </Button>
+                    <span className="text-xs text-muted-foreground truncate">
+                      {verifyFileName || "Sin archivo"}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label className="text-xs text-muted-foreground">Acciones</Label>
+                  <Button
+                    onClick={handleStartVerification}
+                    disabled={verifyRunning || !verifyPoolId || verifyTargets.length === 0}
+                    className="gap-2"
+                  >
+                    {verifyRunning ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <MessageSquare className="h-4 w-4" />
+                    )}
+                    Verificar WhatsApp
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="gap-2"
+                    onClick={() => handleDownloadVerificationExport()}
+                    disabled={!verifyBatchId}
+                  >
+                    <Download className="h-4 w-4" />
+                    Descargar Excel
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
+                <span>Números cargados: {verifyTargets.length}</span>
+                <span>Verificados: {verifySummary.verified}</span>
+                <span>Fallidos: {verifySummary.failed}</span>
+                {verifyProgress.total > 0 && (
+                  <span>
+                    Progreso: {verifyProgress.processed}/{verifyProgress.total}
+                  </span>
+                )}
+              </div>
+
+              {verifyPreview.length > 0 && (
+                <div className="border rounded-md">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/50">
+                        <TableHead>RUT</TableHead>
+                        <TableHead>Teléfono</TableHead>
+                        <TableHead>WhatsApp</TableHead>
+                        <TableHead>WA ID</TableHead>
+                        <TableHead>Sesión</TableHead>
+                        <TableHead>Verificado</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {verifyPreview.slice(0, 10).map((item, index) => (
+                        <TableRow key={`${item.phone}-${index}`}>
+                          <TableCell className="text-xs">{item.rut ?? "-"}</TableCell>
+                          <TableCell className="font-mono text-xs">{item.phone}</TableCell>
+                          <TableCell className="text-xs">
+                            {item.whatsapp ? "Sí" : "No"}
+                          </TableCell>
+                          <TableCell className="text-xs">{item.wa_id ?? "-"}</TableCell>
+                          <TableCell className="text-xs">{item.verifiedBy ?? "-"}</TableCell>
+                          <TableCell className="text-xs">
+                            {item.verifiedAt
+                              ? new Date(item.verifiedAt).toLocaleString()
+                              : "-"}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                  {verifyPreview.length > 10 && (
+                    <div className="px-4 py-2 text-xs text-muted-foreground">
+                      Mostrando 10 de {verifyPreview.length} (preview limitado a 200)
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {verificationBatches?.length ? (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">Historial reciente</div>
+                  <div className="space-y-2">
+                    {verificationBatches.slice(0, 5).map((batch) => (
+                      <div
+                        key={batch.id}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-2 text-xs"
+                      >
+                        <span>
+                          {new Date(batch.createdAt).toLocaleString()} · {batch.status}
+                        </span>
+                        <span>
+                          Total: {batch.total} | OK: {batch.verified} | No: {batch.failed}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDownloadVerificationExport(batch.id)}
+                        >
+                          Descargar
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
+        )}
+
+        {isSupervisorOrAdmin && (
+          <Card
+            className="border-dashed border-2 bg-muted/30 cursor-pointer hover:bg-muted/50 transition-colors"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <CardContent className="flex flex-col items-center justify-center py-10 gap-4">
+               <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
+                 <FileSpreadsheet className="h-6 w-6 text-primary" />
+               </div>
+               <div className="text-center">
+                 <h3 className="font-semibold">Importación rápida</h3>
+                 <p className="text-sm text-muted-foreground">Arrastra y suelta tu archivo CSV o Excel aquí, o haz clic para seleccionar</p>
+                 <p className="text-xs text-muted-foreground mt-1">
+                   Formato: nombre, teléfono, deuda (opcional), nombre ejecutivo, fono ejecutivo
+                 </p>
+               </div>
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardHeader className="p-4 border-b">
@@ -1043,9 +1552,19 @@ export default function Debtors() {
               <Table>
                 <TableHeader>
                   <TableRow className="bg-muted/50 hover:bg-muted/50">
+                    {isSupervisorOrAdmin && (
+                      <TableHead className="w-[40px]">
+                        <Checkbox
+                          checked={allSelected ? true : isIndeterminate ? "indeterminate" : false}
+                          onCheckedChange={(checked) => toggleSelectAll(checked === true)}
+                          aria-label="Seleccionar todos"
+                        />
+                      </TableHead>
+                    )}
                     <TableHead>Estado</TableHead>
                     <TableHead>Nombre</TableHead>
                     <TableHead>Teléfono</TableHead>
+                    {isSupervisorOrAdmin && <TableHead>Ejecutivo</TableHead>}
                     <TableHead className="text-right">Monto deuda</TableHead>
                     <TableHead className="text-right">Último contacto</TableHead>
                     <TableHead className="w-[100px] text-center">Acciones</TableHead>
@@ -1054,11 +1573,29 @@ export default function Debtors() {
                 <TableBody>
                   {filteredDebtors.map((debtor) => (
                     <TableRow key={debtor.id} data-testid={`row-debtor-${debtor.id}`}>
+                      {isSupervisorOrAdmin && (
+                        <TableCell>
+                          <Checkbox
+                            checked={selectedDebtorIds.includes(debtor.id)}
+                            onCheckedChange={(checked) =>
+                              toggleDebtorSelection(debtor.id, checked === true)
+                            }
+                            aria-label={`Seleccionar ${debtor.name}`}
+                          />
+                        </TableCell>
+                      )}
                       <TableCell>
                         {getStatusBadge(debtor.status)}
                       </TableCell>
                       <TableCell className="font-medium">{debtor.name}</TableCell>
                       <TableCell className="font-mono text-sm">{debtor.phone}</TableCell>
+                      {isSupervisorOrAdmin && (
+                        <TableCell className="text-sm text-muted-foreground">
+                          {debtor.ownerUserId
+                            ? executiveById.get(debtor.ownerUserId)?.label ?? "Desconocido"
+                            : debtor.metadata?.nombre_ejecutivo || "Sin asignar"}
+                        </TableCell>
+                      )}
                       <TableCell className="text-right font-mono">${debtor.debt.toLocaleString()}</TableCell>
                       <TableCell className="text-right text-muted-foreground text-sm">
                         {debtor.lastContact ? new Date(debtor.lastContact).toLocaleDateString() : 'Nunca'}

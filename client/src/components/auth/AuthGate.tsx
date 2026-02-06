@@ -1,10 +1,20 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import { useAuthMe } from "@/lib/api";
 import Login from "@/pages/Login";
 
 export default function AuthGate({ children }: { children: ReactNode }) {
   const { data: user, isLoading } = useAuthMe();
+
+  useEffect(() => {
+    if (!user) return;
+    if (import.meta.env.MODE === "production") return;
+    console.info("[auth] /api/auth/me", {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+    });
+  }, [user]);
 
   if (isLoading) {
     return (
@@ -20,4 +30,3 @@ export default function AuthGate({ children }: { children: ReactNode }) {
 
   return <>{children}</>;
 }
-
