@@ -30,7 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Plus } from "lucide-react";
+import { Loader2, Plus, Trash2 } from "lucide-react";
 import {
   useAuthMe,
   useUsers,
@@ -38,6 +38,7 @@ import {
   useUpdateUser,
   useResetUserPassword,
   useUpdateUserPermissions,
+  useDeleteUser,
   type AdminUser,
 } from "@/lib/api";
 import { getErrorMessage } from "@/lib/errors";
@@ -50,6 +51,7 @@ export default function Users() {
   const updateUser = useUpdateUser();
   const resetPassword = useResetUserPassword();
   const updatePermissions = useUpdateUserPermissions();
+  const deleteUser = useDeleteUser();
 
   const roleOptions = [
     { label: "Admin", value: "admin" },
@@ -84,14 +86,24 @@ export default function Users() {
   };
 
   const handleCreate = async () => {
-    if (!createUsername.trim() || !createPassword.trim()) {
+    const username = createUsername.trim().toLowerCase();
+    const password = createPassword.trim();
+    if (!username || !password) {
       alert("Username y password son requeridos");
+      return;
+    }
+    if (username.length < 3) {
+      alert("Username debe tener al menos 3 caracteres");
+      return;
+    }
+    if (password.length < 6) {
+      alert("Password debe tener al menos 6 caracteres");
       return;
     }
     try {
       await createUser.mutateAsync({
-        username: createUsername.trim().toLowerCase(),
-        password: createPassword.trim(),
+        username,
+        password,
         role: createRole,
       });
       setCreateUsername("");
@@ -146,6 +158,25 @@ export default function Users() {
       setResetPasswordValue("");
     } catch (error: any) {
       alert(getErrorMessage(error, "Error al resetear contraseña"));
+    }
+  };
+
+  const handleDeleteUser = async (user: AdminUser) => {
+    if (!me) return;
+    if (user.id === me.id) {
+      alert("No puedes eliminar tu propio usuario");
+      return;
+    }
+
+    const confirmed = confirm(`¿Eliminar usuario ${user.username}? Esta acción no se puede deshacer.`);
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      await deleteUser.mutateAsync(user.id);
+    } catch (error: any) {
+      alert(getErrorMessage(error, "Error al eliminar usuario"));
     }
   };
 
@@ -269,6 +300,16 @@ export default function Users() {
                             onClick={() => setResetUserId(user.id)}
                           >
                             Reset password
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-destructive border-destructive/30 hover:bg-destructive/10"
+                            onClick={() => handleDeleteUser(user)}
+                            disabled={deleteUser.isPending || user.id === me?.id}
+                          >
+                            <Trash2 className="h-4 w-4 mr-1" />
+                            Eliminar
                           </Button>
                         </div>
                       </TableCell>

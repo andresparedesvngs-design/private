@@ -1,6 +1,7 @@
 ﻿import mongoose from "mongoose";
 import {
   SessionModel,
+  ProxyServerModel,
   PoolModel,
   GsmLineModel,
   GsmPoolModel,
@@ -14,6 +15,7 @@ import {
   WhatsAppVerificationBatchModel,
   WhatsAppVerificationModel,
   type Session, type InsertSession,
+  type ProxyServer, type InsertProxyServer,
   type Pool, type InsertPool,
   type GsmLine, type InsertGsmLine,
   type GsmPool, type InsertGsmPool,
@@ -37,12 +39,22 @@ export interface IStorage {
   updateUser(id: string, data: Partial<InsertUser>): Promise<User | undefined>;
   updateUserPassword(id: string, passwordHash: string): Promise<User | undefined>;
   updateUserPermissions(id: string, permissions: string[]): Promise<User | undefined>;
+  deleteUser(id: string): Promise<void>;
 
   getSessions(): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
   createSession(session: InsertSession): Promise<Session>;
   updateSession(id: string, data: Partial<InsertSession>): Promise<Session | undefined>;
   deleteSession(id: string): Promise<void>;
+
+  getProxyServers(): Promise<ProxyServer[]>;
+  getProxyServer(id: string): Promise<ProxyServer | undefined>;
+  createProxyServer(server: InsertProxyServer): Promise<ProxyServer>;
+  updateProxyServer(
+    id: string,
+    data: Partial<InsertProxyServer>
+  ): Promise<ProxyServer | undefined>;
+  disableProxyServer(id: string): Promise<ProxyServer | undefined>;
 
   getPools(): Promise<Pool[]>;
   getPool(id: string): Promise<Pool | undefined>;
@@ -186,8 +198,41 @@ export class MongoStorage implements IStorage {
       messagesSent: obj.messagesSent,
       lastActive: obj.lastActive,
       purpose: obj.purpose,
+      proxyServerId: obj.proxyServerId ? obj.proxyServerId.toString() : obj.proxyServerId,
+      proxyLocked: obj.proxyLocked ?? true,
+      authClientId: obj.authClientId ?? null,
+      disconnectCount: obj.disconnectCount ?? 0,
+      lastDisconnectAt: obj.lastDisconnectAt ?? null,
+      lastDisconnectReason: obj.lastDisconnectReason ?? null,
+      authFailureCount: obj.authFailureCount ?? 0,
+      lastAuthFailureAt: obj.lastAuthFailureAt ?? null,
+      resetAuthCount: obj.resetAuthCount ?? 0,
+      lastResetAuthAt: obj.lastResetAuthAt ?? null,
+      reconnectCount: obj.reconnectCount ?? 0,
+      lastReconnectAt: obj.lastReconnectAt ?? null,
       createdAt: obj.createdAt,
       updatedAt: obj.updatedAt
+    };
+  }
+
+  private transformProxyServer(server: any): ProxyServer {
+    if (!server) return server;
+    const obj = server.toObject ? server.toObject() : server;
+    return {
+      id: obj._id ? obj._id.toString() : obj.id,
+      name: obj.name,
+      scheme: obj.scheme,
+      host: obj.host,
+      port: obj.port,
+      enabled: obj.enabled ?? true,
+      status: obj.status ?? "offline",
+      lastPublicIp: obj.lastPublicIp ?? null,
+      lastCheckAt: obj.lastCheckAt ?? null,
+      lastSeenAt: obj.lastSeenAt ?? null,
+      latencyMs: obj.latencyMs ?? null,
+      lastError: obj.lastError ?? null,
+      createdAt: obj.createdAt,
+      updatedAt: obj.updatedAt,
     };
   }
 
@@ -554,6 +599,19 @@ export class MongoStorage implements IStorage {
     return updated ? this.transformUser(updated) : undefined;
   }
 
+  async deleteUser(id: string): Promise<void> {
+    if (!mongoose.isValidObjectId(id)) return;
+
+    await Promise.all([
+      // Avoid dangling ownership references after deleting the account.
+      CampaignModel.updateMany({ ownerUserId: id }, { $set: { ownerUserId: null } }),
+      DebtorModel.updateMany({ ownerUserId: id }, { $set: { ownerUserId: null } }),
+      NotificationBatchModel.deleteMany({ executiveId: id }),
+    ]);
+
+    await UserModel.findByIdAndDelete(id);
+  }
+
   async getSessions(): Promise<Session[]> {
     const sessions = await SessionModel.find().sort({ createdAt: -1 });
     return sessions.map(s => this.transformSession(s));
@@ -567,6 +625,11 @@ export class MongoStorage implements IStorage {
 
   async createSession(session: InsertSession): Promise<Session> {
     const created = await SessionModel.create(session);
+    const authClientId = created.authClientId ?? created._id?.toString?.();
+    if (authClientId && created.authClientId !== authClientId) {
+      created.authClientId = authClientId;
+      await created.save();
+    }
     return this.transformSession(created);
   }
 
@@ -583,8 +646,54 @@ export class MongoStorage implements IStorage {
   }
 
   async deleteSession(id: string): Promise<void> {
+    // Session IDs are ObjectIds in Mongo; also clean up references in pools (stored as strings).
     if (!mongoose.isValidObjectId(id)) return;
+
+    await PoolModel.updateMany({ sessionIds: id }, { $pull: { sessionIds: id } });
     await SessionModel.findByIdAndDelete(id);
+  }
+
+  async getProxyServers(): Promise<ProxyServer[]> {
+    const servers = await ProxyServerModel.find().sort({ createdAt: -1 });
+    return servers.map((server) => this.transformProxyServer(server));
+  }
+
+  async getProxyServer(id: string): Promise<ProxyServer | undefined> {
+    if (!mongoose.isValidObjectId(id)) return undefined;
+    const server = await ProxyServerModel.findById(id);
+    return server ? this.transformProxyServer(server) : undefined;
+  }
+
+  async createProxyServer(server: InsertProxyServer): Promise<ProxyServer> {
+    const created = await ProxyServerModel.create(server);
+    return this.transformProxyServer(created);
+  }
+
+  async updateProxyServer(
+    id: string,
+    data: Partial<InsertProxyServer>
+  ): Promise<ProxyServer | undefined> {
+    if (!mongoose.isValidObjectId(id)) return undefined;
+    const cleanedData: any = { ...data };
+    Object.keys(cleanedData).forEach((key) => {
+      if (cleanedData[key] === undefined) {
+        delete cleanedData[key];
+      }
+    });
+    const updated = await ProxyServerModel.findByIdAndUpdate(id, cleanedData, {
+      new: true,
+    });
+    return updated ? this.transformProxyServer(updated) : undefined;
+  }
+
+  async disableProxyServer(id: string): Promise<ProxyServer | undefined> {
+    if (!mongoose.isValidObjectId(id)) return undefined;
+    const updated = await ProxyServerModel.findByIdAndUpdate(
+      id,
+      { enabled: false, status: "offline", lastError: "disabled" },
+      { new: true }
+    );
+    return updated ? this.transformProxyServer(updated) : undefined;
   }
 
   async getPools(): Promise<Pool[]> {

@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type {
   Session,
+  ProxyServer,
   Pool,
   GsmLine,
   GsmPool,
@@ -297,6 +298,19 @@ export function useUpdateUserPermissions() {
   });
 }
 
+export function useDeleteUser() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      fetchApi<void>(`/users/${id}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+  });
+}
+
 export function useUpdateMyProfile() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -349,6 +363,89 @@ export function useSessionsHealth(enabled: boolean = true) {
   });
 }
 
+export function useProxyServers(enabled: boolean = true) {
+  return useQuery({
+    queryKey: ["proxy-servers"],
+    queryFn: () => fetchApi<ProxyServer[]>("/proxy-servers"),
+    enabled,
+  });
+}
+
+export function useProxyServer(id: string) {
+  return useQuery({
+    queryKey: ["proxy-servers", id],
+    queryFn: () => fetchApi<ProxyServer>(`/proxy-servers/${id}`),
+    enabled: !!id,
+  });
+}
+
+export function useCreateProxyServer() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (payload: {
+      name: string;
+      scheme?: "socks5";
+      host: string;
+      port: number;
+      enabled?: boolean;
+    }) =>
+      fetchApi<ProxyServer>("/proxy-servers", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["proxy-servers"] });
+    },
+  });
+}
+
+export function useUpdateProxyServer() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (payload: {
+      id: string;
+      data: Partial<ProxyServer>;
+    }) =>
+      fetchApi<ProxyServer>(`/proxy-servers/${payload.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload.data),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["proxy-servers"] });
+    },
+  });
+}
+
+export function useDisableProxyServer() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: string) =>
+      fetchApi<void>(`/proxy-servers/${id}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["proxy-servers"] });
+    },
+  });
+}
+
+export function useCheckProxyServer() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: string) =>
+      fetchApi<ProxyServer>(`/proxy-servers/${id}/check`, {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["proxy-servers"] });
+    },
+  });
+}
+
 export function useSession(id: string) {
   return useQuery({
     queryKey: ['sessions', id],
@@ -361,10 +458,15 @@ export function useCreateSession() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: () => fetchApi<Session>('/sessions', {
-      method: 'POST',
-      body: JSON.stringify({}),
-    }),
+    mutationFn: (payload?: {
+      purpose?: string;
+      proxyServerId?: string | null;
+      proxyLocked?: boolean;
+    }) =>
+      fetchApi<Session>('/sessions', {
+        method: 'POST',
+        body: JSON.stringify(payload ?? {}),
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['sessions'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
@@ -382,6 +484,37 @@ export function useDeleteSession() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['sessions'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
+export function useUpdateSession() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (payload: { id: string; data: Partial<Session> }) =>
+      fetchApi<Session>(`/sessions/${payload.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload.data),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+  });
+}
+
+export function useStopSession() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: string) =>
+      fetchApi<{ message: string }>(`/sessions/${id}/stop`, {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
 }
@@ -786,6 +919,24 @@ export function useDebtors(campaignId?: string) {
   return useQuery({
     queryKey: ['debtors', campaignId],
     queryFn: () => fetchApi<Debtor[]>(`/debtors${campaignId ? `?campaignId=${campaignId}` : ''}`),
+  });
+}
+
+export function useBulkUploadCampaignDebtors() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (payload: { campaignId: string; debtors: Partial<Debtor>[] }) =>
+      fetchApi<Debtor[]>(`/campaigns/${payload.campaignId}/debtors/bulk`, {
+        method: "POST",
+        body: JSON.stringify(payload.debtors),
+      }),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["debtors"] });
+      queryClient.invalidateQueries({ queryKey: ["debtors", variables.campaignId] });
+      queryClient.invalidateQueries({ queryKey: ["campaigns"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
   });
 }
 

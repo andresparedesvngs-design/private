@@ -17,6 +17,7 @@
 
 - `server/index.ts` — entrypoint Express; logging HTTP; auth; registro de rutas; integración Vite (dev) / static (prod).
 - `server/routes.ts` — API REST + Socket.IO; endpoints para sesiones, pools, campañas, deudores, mensajes, settings, logs.
+- `server/proxyMonitor.ts` — worker de health-check para Proxy Servers (TCP + ipify via SOCKS5) y eventos Socket.IO.
 - `server/auth.ts` — Passport Local, sesiones y middleware de autorización; conecta auth con Socket.IO.
 - `server/db.ts` — conexión MongoDB con Mongoose.
 - `server/storage.ts` — implementación de `MongoStorage` + helpers de negocio.
@@ -38,7 +39,7 @@
 - `client/src/main.tsx` — bootstrap React.
 - `client/src/App.tsx` — router (wouter), providers y AuthGate.
 - `client/src/components/` — layout, auth y UI (shadcn/ui).
-- `client/src/pages/` — vistas principales: Dashboard, Sessions, Campaigns, Debtors, Contacts, Messages, Settings, SystemLogs, NotFound.
+- `client/src/pages/` — vistas principales: Dashboard, Sessions, Campaigns, Debtors, Contacts, Messages, Settings, SystemLogs, ProxyServers, NotFound.
 - `client/src/lib/` — API client (React Query), sockets, utils y queryClient.
 - `client/src/hooks/` — hooks de UI.
 - `client/public/` — assets públicos (opengraph, favicon).

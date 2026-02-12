@@ -60,11 +60,21 @@
 
 ### WhatsApp / Puppeteer
 - `WHATSAPP_AUTO_RESTORE` — restaura sesiones al iniciar (`server/routes.ts`).
+- `WHATSAPP_AUTO_RESTORE_BACKGROUND` — ejecuta la restauracion en segundo plano (default `true`) para no bloquear el arranque HTTP (`server/routes.ts`).
 - `WHATSAPP_QR_MANUAL`, `WHATSAPP_QR_WINDOW_MS` — control de QR manual (`server/whatsappManager.ts`).
 - `WHATSAPP_POLL_ENABLED`, `WHATSAPP_POLL_INTERVAL_MS` — polling de mensajes entrantes (`server/whatsappManager.ts`).
 - `WHATSAPP_VERIFY_WINDOW_MS` — ventana máxima (ms) para considerar una sesión como verificada (default 30000).
 - `WHATSAPP_USER_AGENT` / `PUPPETEER_USER_AGENT` — user agent opcional (`server/whatsappManager.ts`).
 - `PUPPETEER_EXECUTABLE_PATH` / `CHROME_PATH` — ruta explícita a Chrome/Chromium (`server/whatsappManager.ts`).
+
+### Proxy Servers (SOCKS5)
+- `PROXY_ALLOWED_SUBNETS` — subredes permitidas para hosts (default `172.16.55.0/24`).
+- `PROXY_CHECK_INTERVAL_MS` — intervalo de health-check (default `15000`).
+- `PROXY_TCP_TIMEOUT_MS` — timeout TCP (default `2000`).
+- `PROXY_HTTP_TIMEOUT_MS` — timeout HTTP vía proxy (default `8000`).
+- `PROXY_DEGRADED_LATENCY_MS` — umbral de latencia para `degraded` (default `2500`).
+- `PROXY_CHECK_RETRIES` — intentos máximos de check HTTP (default `1`).
+- `PROXY_IPIFY_URL` — endpoint para IP pública (default `https://api.ipify.org`).
 
 ### Campañas / motor
 - `CAMPAIGN_SEND_WINDOW_ENABLED`, `CAMPAIGN_SEND_WINDOW_START`, `CAMPAIGN_SEND_WINDOW_END` (`server/campaignEngine.ts`).

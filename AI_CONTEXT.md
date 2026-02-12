@@ -10,9 +10,9 @@
 - Monorepo con tres bloques: `server/` (Express + Socket.IO), `client/` (React + Vite) y `shared/` (Zod + Mongoose + tipos compartidos). Ver `server/index.ts`, `client/src/App.tsx`, `shared/schema.ts`.
 - **Backend**: Node.js + TypeScript, Express, Socket.IO, Mongoose/MongoDB, Passport Local, whatsapp-web.js y sistema de campañas. Ver `server/index.ts`, `server/routes.ts`, `server/campaignEngine.ts`, `server/storage.ts`, `server/whatsappManager.ts`, `server/smsManager.ts`.
 - **Frontend**: React + Vite, wouter, TanStack React Query, shadcn/ui, sockets para tiempo real. Ver `client/src/App.tsx`, `client/src/lib/api.ts`, `client/src/lib/socket.ts`.
-- **Frontend/UI (rutas expuestas)**: Panel, Sesiones, Campañas, Mensajes, Deudores, Contactos, Registros y Configuración. No hay ruta `/cleanup` en el router ni opción de menú. Ver `client/src/components/layout/AppSidebar.tsx`, `client/src/App.tsx`.
+- **Frontend/UI (rutas expuestas)**: Panel, Sesiones, Campañas, Mensajes, Deudores, Contactos, Registros, Configuración y Proxy Servers. No hay ruta `/cleanup` en el router ni opción de menú. Ver `client/src/components/layout/AppSidebar.tsx`, `client/src/App.tsx`.
 - **Base de datos**: MongoDB vía Mongoose (`server/db.ts`, `shared/schema.ts`).
-- **Tiempo real**: Socket.IO se usa para eventos de sesiones, campañas y mensajes (`server/routes.ts`, `server/whatsappManager.ts`, `server/campaignEngine.ts`).
+- **Tiempo real**: Socket.IO se usa para eventos de sesiones, campañas, mensajes y proxies (`server/routes.ts`, `server/whatsappManager.ts`, `server/campaignEngine.ts`, `server/proxyMonitor.ts`).
 
 ## 2. Ejecución del sistema (visión operativa)
 
@@ -30,7 +30,7 @@
 ## 4. Contratos de dominio (fuente: shared/schema.ts)
 
 ### 4.1 Session (WhatsApp)
-- Campos: `phoneNumber`, `status`, `qrCode`, `battery`, `messagesSent`, `lastActive`, `purpose`, timestamps. Ver `shared/schema.ts`.
+- Campos: `phoneNumber`, `status`, `qrCode`, `battery`, `messagesSent`, `lastActive`, `purpose`, `proxyServerId`, `proxyLocked`, timestamps. Ver `shared/schema.ts`.
 - Estados observados en backend/UI: `initializing`, `qr_ready`, `authenticated`, `connected`, `reconnecting`, `auth_failed`, `disconnected`. Ver `server/whatsappManager.ts`, `client/src/pages/Sessions.tsx`.
 - El `status` persistido puede quedar desfasado frente al estado real; ver “Estado verificado de sesión”.
 
@@ -85,17 +85,26 @@
 ### 4.11 NotificationBatch
 - Campos: `executiveId`, `items[]` (`debtorId`, `debtorName`, `debtorRut`, `snippet`, `campaignId`, `campaignName`, `receivedAt`, `sessionId`, `count`), `status`, `nextSendAt`. Ver `shared/schema.ts`, `server/notificationService.ts`.
 
+### 4.12 ProxyServer
+- Campos: `name`, `scheme`, `host`, `port`, `enabled`, `status`, `lastPublicIp`, `lastCheckAt`, `lastSeenAt`, `latencyMs`, `lastError`. Ver `shared/schema.ts`.
+- El endpoint estable del proxy es `scheme://host:port`; la IP pública se actualiza por health-check vía SOCKS5. Ver `server/proxyMonitor.ts`.
+
 ## 5. Flujos end-to-end (UI → API → DB/Sockets)
 
 ### 5.1 Login
 - UI `AuthGate` consulta `/api/auth/me`; si 401, muestra `Login.tsx`. Ver `client/src/components/auth/AuthGate.tsx`, `client/src/pages/Login.tsx`, `server/auth.ts`.
 
 ### 5.2 Sesiones WhatsApp
-- Crear sesión: UI → POST `/api/sessions` → `storage.createSession` + `whatsappManager.createSession`, luego QR vía `/api/sessions/:id/qr`. Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
+- Crear sesión: UI → POST `/api/sessions` (requiere `proxyServerId`) → `storage.createSession` + `whatsappManager.createSession`, luego QR vía `/api/sessions/:id/qr`. Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
 - QR manual: `WHATSAPP_QR_MANUAL` + ventana QR (`WHATSAPP_QR_WINDOW_MS`). Ver `server/whatsappManager.ts`.
 - Reconnect / reset auth: UI usa `/api/sessions/:id/reconnect` y `/api/sessions/:id/reset-auth`. Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
+- Stop session: UI usa `/api/sessions/:id/stop` (detiene sin borrar). Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
 - Health de sesiones (admin): `GET /api/sessions/health` devuelve estado verificado y último heartbeat.
 - Validar sesiones: UI → `POST /api/sessions/verify-now`, luego refresca con `GET /api/sessions/health`.
+
+### 5.10 Proxy Servers (admin)
+- CRUD y check manual: UI → `/api/proxy-servers` (GET/POST/PATCH/DELETE) + `/api/proxy-servers/:id/check`. Ver `client/src/pages/ProxyServers.tsx`, `server/routes.ts`.
+- Health-check automático: `proxyMonitor` hace TCP + request a `api.ipify.org` vía SOCKS5 y emite `proxy:updated`. Ver `server/proxyMonitor.ts`, `client/src/lib/socket.ts`.
 
 ### 5.3 Campañas
 - Crear campaña: UI → POST `/api/campaigns` (Zod). Ver `client/src/pages/Campaigns.tsx`, `server/routes.ts`.
@@ -152,8 +161,13 @@
 - `GET /api/sessions`, `GET /api/sessions/:id`, `POST /api/sessions`, `PATCH /api/sessions/:id`, `DELETE /api/sessions/:id`
 - `GET /api/sessions/health` (admin)
 - `POST /api/sessions/verify-now` (admin/supervisor)
-- `POST /api/sessions/:id/reconnect`, `POST /api/sessions/:id/reset-auth`, `POST /api/sessions/:id/qr`
+- `POST /api/sessions/:id/reconnect`, `POST /api/sessions/:id/reset-auth`, `POST /api/sessions/:id/qr`, `POST /api/sessions/:id/stop`
 - `POST /api/sessions/:id/send` (envío manual)
+
+### Proxy Servers
+- `GET /api/proxy-servers`, `GET /api/proxy-servers/:id`
+- `POST /api/proxy-servers`, `PATCH /api/proxy-servers/:id`, `DELETE /api/proxy-servers/:id`
+- `POST /api/proxy-servers/:id/check`
 
 ### Pools (WhatsApp)
 - `GET /api/pools`, `GET /api/pools/:id`, `POST /api/pools`, `PATCH /api/pools/:id`, `DELETE /api/pools/:id`
@@ -193,6 +207,7 @@
 - Sesiones: `session:created`, `session:updated`, `session:deleted`, `session:qr`, `session:ready`, `session:auth_failed`, `session:disconnected`, `session:reconnecting`. Ver `server/routes.ts`, `server/whatsappManager.ts`.
 - Campañas: `campaign:started`, `campaign:paused`, `campaign:updated`, `campaign:progress`, `campaign:error`, `campaign:cooldown`. La UI usa `campaign:error` para mostrar badge/tooltip de error, sin estado `status="error"`. Ver `server/routes.ts`, `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
 - Mensajes: `message:created`, `message:received`. Ver `server/campaignEngine.ts`, `server/whatsappManager.ts`.
+- Proxies: `proxy:updated`. Ver `server/proxyMonitor.ts`, `client/src/lib/socket.ts`.
 
 ## 8. Invariantes operativas (no romper)
 

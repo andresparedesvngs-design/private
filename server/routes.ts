@@ -4,11 +4,13 @@ import { Server as SocketServer } from "socket.io";
 import { storage } from "./storage";
 import { whatsappManager } from "./whatsappManager";
 import { campaignEngine } from "./campaignEngine";
+import { proxyMonitor } from "./proxyMonitor";
 import { bindAuthToSocket, type AuthUser } from "./auth";
 import bcrypt from "bcryptjs";
 import { notificationService } from "./notificationService";
 import {
   insertSessionSchema,
+  insertProxyServerSchema,
   insertPoolSchema,
   insertGsmLineSchema,
   insertGsmPoolSchema,
@@ -39,6 +41,7 @@ export async function registerRoutes(
   (app as any).io = io;
   whatsappManager.setSocketServer(io);
   campaignEngine.setSocketServer(io);
+  proxyMonitor.setSocketServer(io);
 
   io.on('connection', (socket) => {
     console.log('Client connected:', socket.id);
@@ -73,6 +76,69 @@ export async function registerRoutes(
 
   const normalizePhoneDigits = (value?: string | null) =>
     (value ?? "").replace(/\D/g, "");
+
+  type CidrRange = { base: number; mask: number; raw: string };
+
+  const parseIpv4 = (value: string): number | null => {
+    const parts = value.trim().split(".");
+    if (parts.length !== 4) return null;
+    const numbers = parts.map((part) => Number(part));
+    if (numbers.some((num) => !Number.isInteger(num) || num < 0 || num > 255)) {
+      return null;
+    }
+    return (
+      ((numbers[0] << 24) >>> 0) +
+      ((numbers[1] << 16) >>> 0) +
+      ((numbers[2] << 8) >>> 0) +
+      (numbers[3] >>> 0)
+    ) >>> 0;
+  };
+
+  const parseCidr = (value: string): CidrRange | null => {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const [ip, maskRaw] = trimmed.split("/");
+    const base = parseIpv4(ip);
+    if (base === null) return null;
+    const maskBits = maskRaw ? Number(maskRaw) : 32;
+    if (!Number.isInteger(maskBits) || maskBits < 0 || maskBits > 32) {
+      return null;
+    }
+    const mask =
+      maskBits === 0 ? 0 : ((~((1 << (32 - maskBits)) - 1)) >>> 0);
+    return { base, mask, raw: trimmed };
+  };
+
+  const buildAllowedProxyRanges = (): CidrRange[] => {
+    const raw = String(
+      process.env.PROXY_ALLOWED_SUBNETS ?? "172.16.55.0/24"
+    );
+    const candidates = raw
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    const ranges = candidates.map(parseCidr).filter(Boolean) as CidrRange[];
+    if (ranges.length > 0) return ranges;
+    const fallback = parseCidr("172.16.55.0/24");
+    return fallback ? [fallback] : [];
+  };
+
+  const allowedProxyRanges = buildAllowedProxyRanges();
+
+  const isProxyHostAllowed = (host: string): boolean => {
+    const ip = parseIpv4(host);
+    if (ip === null) return false;
+    if (!allowedProxyRanges.length) return false;
+    return allowedProxyRanges.some((range) => (ip & range.mask) === (range.base & range.mask));
+  };
+
+  const validateProxyHost = (host: string): string | null => {
+    if (!host.trim()) return "Host requerido";
+    if (!isProxyHostAllowed(host)) {
+      return "Host fuera de las subredes permitidas";
+    }
+    return null;
+  };
 
   type VerifyDebtorInput = {
     rut?: string | null;
@@ -116,6 +182,33 @@ export async function registerRoutes(
         });
     });
   };
+
+  const RECONNECT_DESTROY_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.WHATSAPP_RECONNECT_DESTROY_TIMEOUT_MS ?? "15000");
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 15000;
+  })();
+
+  const RECONNECT_CREATE_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.WHATSAPP_RECONNECT_CREATE_TIMEOUT_MS ?? "30000");
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 30000;
+  })();
+
+  const RESET_AUTH_ROUTE_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.WHATSAPP_RESET_AUTH_ROUTE_TIMEOUT_MS ?? "45000");
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 45000;
+  })();
+
+  const QR_ROUTE_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.WHATSAPP_QR_ROUTE_TIMEOUT_MS ?? "10000");
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10000;
+  })();
+
+  const sessionBusyLocks = new Set<string>();
+  const isSessionBusyStatus = (status?: string | null) =>
+    status === "initializing" || status === "reconnecting";
+
+  const isSessionBusy = (sessionId: string, status?: string | null) =>
+    sessionBusyLocks.has(sessionId) || isSessionBusyStatus(status);
 
   const extractWaId = (value: any): string | null => {
     if (!value) return null;
@@ -241,19 +334,32 @@ export async function registerRoutes(
   // pero ANTES de las rutas
   const autoRestore =
     String(process.env.WHATSAPP_AUTO_RESTORE ?? "true").toLowerCase() !== "false";
-  if (autoRestore) {
+  const autoRestoreBackground =
+    String(process.env.WHATSAPP_AUTO_RESTORE_BACKGROUND ?? "true").toLowerCase() !== "false";
+
+  const runSessionRestore = async () => {
     try {
-      console.log('=== INICIANDO RESTAURACIÓN DE SESIONES ===');
+      console.log("=== STARTING SESSION RESTORE ===");
       await whatsappManager.restoreSessions();
-      console.log('=== RESTAURACIÓN DE SESIONES COMPLETADA ===');
+      console.log("=== SESSION RESTORE COMPLETED ===");
     } catch (error) {
-      console.error('Error al restaurar sesiones:', error);
+      console.error("Error restoring sessions:", error);
+    }
+  };
+
+  if (autoRestore) {
+    if (autoRestoreBackground) {
+      console.log("=== SESSION RESTORE RUNNING IN BACKGROUND ===");
+      void runSessionRestore();
+    } else {
+      await runSessionRestore();
     }
   } else {
-    console.log('=== AUTO RESTAURACIÓN DESACTIVADA ===');
+    console.log("=== AUTO RESTORE DISABLED ===");
   }
 
   notificationService.start();
+  proxyMonitor.start();
 
   app.get("/api/dashboard/stats", async (req, res) => {
     try {
@@ -367,8 +473,10 @@ export async function registerRoutes(
       if (!user) return;
       const schema = z.object({
         purpose: z.string().optional(),
+        proxyServerId: z.string().optional().nullable(),
+        proxyLocked: z.boolean().optional(),
       });
-      const { purpose } = schema.parse(req.body ?? {});
+      const { purpose, proxyServerId, proxyLocked } = schema.parse(req.body ?? {});
       const normalizedPurpose = purpose?.trim();
       if (normalizedPurpose && normalizedPurpose !== "default" && normalizedPurpose !== "notify") {
         return res.status(400).json({ error: "Invalid session purpose" });
@@ -376,10 +484,28 @@ export async function registerRoutes(
       if (normalizedPurpose === "notify" && !isAdmin(user)) {
         return res.status(403).json({ error: "No autorizado" });
       }
+      if (proxyServerId) {
+        const proxy = await storage.getProxyServer(proxyServerId);
+        if (!proxy) {
+          return res.status(404).json({ error: "ProxyServer no encontrado" });
+        }
+        if (!proxy.enabled) {
+          return res.status(400).json({ error: "ProxyServer deshabilitado" });
+        }
+        if (proxy.status === "offline") {
+          return res.status(409).json({ error: "ProxyServer offline" });
+        }
+      }
       const session = await storage.createSession({
         status: 'initializing',
         messagesSent: 0,
         purpose: normalizedPurpose ?? "default",
+        proxyServerId: proxyServerId ?? null,
+        proxyLocked: proxyServerId ? (proxyLocked ?? true) : false,
+        disconnectCount: 0,
+        authFailureCount: 0,
+        resetAuthCount: 0,
+        reconnectCount: 0,
       });
       
       await whatsappManager.createSession(session.id);
@@ -406,6 +532,64 @@ export async function registerRoutes(
       if (payload.purpose === "notify" && !isAdmin(user)) {
         return res.status(403).json({ error: "No autorizado" });
       }
+
+      const wantsProxyChange = payload.proxyServerId !== undefined;
+      const wantsProxyLockChange = payload.proxyLocked !== undefined;
+      if ((wantsProxyChange || wantsProxyLockChange) && !isAdmin(user)) {
+        return res.status(403).json({ error: "No autorizado" });
+      }
+
+      const existing = await storage.getSession(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      if (wantsProxyChange) {
+        const targetProxyId = payload.proxyServerId ?? null;
+        const currentProxyId = existing.proxyServerId ?? null;
+        const isDifferent = targetProxyId !== currentProxyId;
+
+        if (isDifferent) {
+          if (existing.proxyLocked && payload.proxyLocked !== false) {
+            return res.status(409).json({ error: "Proxy bloqueado para cambios" });
+          }
+
+          if (!["disconnected", "auth_failed"].includes(existing.status)) {
+            return res.status(409).json({
+              error: "La sesión debe estar detenida para cambiar proxy",
+            });
+          }
+
+          if (whatsappManager.getSession(existing.id)) {
+            return res.status(409).json({
+              error: "Detén la sesión antes de cambiar el proxy",
+            });
+          }
+
+          if (currentProxyId && targetProxyId) {
+            const currentProxy = await storage.getProxyServer(currentProxyId);
+            if (currentProxy && currentProxy.status === "online") {
+              return res.status(409).json({
+                error: "El proxy actual no está en mal estado",
+              });
+            }
+          }
+
+          if (targetProxyId) {
+            const targetProxy = await storage.getProxyServer(targetProxyId);
+            if (!targetProxy) {
+              return res.status(404).json({ error: "ProxyServer no encontrado" });
+            }
+            if (!targetProxy.enabled) {
+              return res.status(400).json({ error: "ProxyServer deshabilitado" });
+            }
+            if (targetProxy.status === "offline") {
+              return res.status(409).json({ error: "ProxyServer offline" });
+            }
+          }
+        }
+      }
+
       const session = await storage.updateSession(req.params.id, payload);
       if (!session) {
         return res.status(404).json({ error: "Session not found" });
@@ -428,7 +612,9 @@ export async function registerRoutes(
       if (!ensureRole(req, res, ["admin"])) {
         return;
       }
-      await whatsappManager.destroySession(req.params.id);
+      // Don't block the HTTP response on whatsapp-web.js teardown, which can hang in some cases.
+      // For deletions we also remove LocalAuth state so re-creating the session is a clean slate.
+      void whatsappManager.destroySession(req.params.id, { removeAuth: true });
       await storage.deleteSession(req.params.id);
       
       io.emit('session:deleted', { id: req.params.id });
@@ -440,6 +626,171 @@ export async function registerRoutes(
   });
 
   app.post("/api/sessions/:id/reconnect", async (req, res) => {
+    const sessionId = req.params.id;
+    console.log(`[routes][sessions][${sessionId}] reconnect requested`);
+
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      if (session.status === "auth_failed") {
+        console.warn(
+          `[routes][sessions][${sessionId}] reconnect blocked: reset-auth required`
+        );
+        return res.status(409).json({
+          error: "reset_required",
+          message: "Session requires reset-auth before reconnect",
+          sessionId,
+        });
+      }
+
+      if (isSessionBusy(sessionId, session.status)) {
+        console.warn(`[routes][sessions][${sessionId}] reconnect blocked: busy`);
+        return res.status(409).json({
+          error: "busy",
+          message: "Session is busy",
+          sessionId,
+        });
+      }
+
+      sessionBusyLocks.add(sessionId);
+      const reconnectAt = new Date();
+      console.log(`[routes][sessions][${sessionId}] reconnect start`);
+
+      try {
+        await storage.updateSession(sessionId, {
+          status: "reconnecting",
+          qrCode: null,
+        });
+
+        await withTimeout(
+          whatsappManager.destroySession(sessionId),
+          RECONNECT_DESTROY_TIMEOUT_MS,
+          `reconnect destroy session ${sessionId}`
+        );
+
+        await storage.updateSession(sessionId, {
+          status: "initializing",
+          qrCode: null,
+          reconnectCount: (session.reconnectCount ?? 0) + 1,
+          lastReconnectAt: reconnectAt,
+        });
+
+        await withTimeout(
+          whatsappManager.createSession(sessionId),
+          RECONNECT_CREATE_TIMEOUT_MS,
+          `reconnect create session ${sessionId}`
+        );
+      } catch (error: any) {
+        const message = error?.message ?? String(error);
+        const nextStatus = /auth/i.test(message) ? "auth_failed" : "disconnected";
+        console.error(`[routes][sessions][${sessionId}] reconnect failed:`, message);
+
+        await storage.updateSession(sessionId, {
+          status: nextStatus,
+        });
+
+        await storage.createSystemLog({
+          level: "error",
+          source: "whatsapp",
+          message: `Reconnect failed for session ${sessionId}`,
+          metadata: { sessionId, error: message },
+        });
+
+        return res.status(500).json({
+          error: "reconnect_failed",
+          message: "No se pudo reconectar la sesión",
+          details: message,
+          sessionId,
+        });
+      } finally {
+        sessionBusyLocks.delete(sessionId);
+      }
+
+      io.emit("session:reconnecting", { id: sessionId });
+      console.log(`[routes][sessions][${sessionId}] reconnect initiated`);
+
+      res.json({ message: "Reconnection initiated", sessionId });
+    } catch (error: any) {
+      console.error(
+        `[routes][sessions][${sessionId}] reconnect unexpected error:`,
+        error?.message ?? error
+      );
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/sessions/:id/reset-auth", async (req, res) => {
+    const sessionId = req.params.id;
+    console.log(`[routes][sessions][${sessionId}] reset-auth requested`);
+
+    try {
+      if (!ensureRole(req, res, ["admin"])) {
+        return;
+      }
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      if (isSessionBusy(sessionId, session.status)) {
+        console.warn(`[routes][sessions][${sessionId}] reset-auth blocked: busy`);
+        return res.status(409).json({
+          error: "busy",
+          message: "Session is busy",
+          sessionId,
+        });
+      }
+
+      sessionBusyLocks.add(sessionId);
+      console.log(`[routes][sessions][${sessionId}] reset-auth start`);
+      try {
+        await withTimeout(
+          whatsappManager.resetSessionAuth(sessionId),
+          RESET_AUTH_ROUTE_TIMEOUT_MS,
+          `reset-auth session ${sessionId}`
+        );
+      } catch (error: any) {
+        const message = error?.message ?? String(error);
+        const nextStatus = /auth/i.test(message) ? "auth_failed" : "disconnected";
+        console.error(`[routes][sessions][${sessionId}] reset-auth failed:`, message);
+
+        await storage.updateSession(sessionId, { status: nextStatus });
+        await storage.createSystemLog({
+          level: "error",
+          source: "whatsapp",
+          message: `Reset-auth failed for session ${sessionId}`,
+          metadata: { sessionId, error: message },
+        });
+
+        return res.status(500).json({
+          error: "reset_auth_failed",
+          message: "No se pudo reiniciar auth",
+          details: message,
+          sessionId,
+        });
+      } finally {
+        sessionBusyLocks.delete(sessionId);
+      }
+
+      io.emit("session:reconnecting", { id: sessionId });
+      console.log(`[routes][sessions][${sessionId}] reset-auth initiated`);
+      res.json({ message: "Auth reset initiated", sessionId });
+    } catch (error: any) {
+      console.error(
+        `[routes][sessions][${sessionId}] reset-auth unexpected error:`,
+        error?.message ?? error
+      );
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/sessions/:id/stop", async (req, res) => {
     try {
       if (!ensureRole(req, res, ["admin", "supervisor"])) {
         return;
@@ -450,50 +801,38 @@ export async function registerRoutes(
       }
 
       await whatsappManager.destroySession(req.params.id);
-      
-      await storage.updateSession(req.params.id, {
-        status: 'initializing',
-        qrCode: null
-      });
 
-      await whatsappManager.createSession(req.params.id);
-      
-      io.emit('session:reconnecting', { id: req.params.id });
-      
-      res.json({ message: 'Reconnection initiated', sessionId: req.params.id });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/sessions/:id/reset-auth", async (req, res) => {
-    try {
-      if (!ensureRole(req, res, ["admin"])) {
-        return;
-      }
-      const session = await storage.getSession(req.params.id);
-      if (!session) {
-        return res.status(404).json({ error: "Session not found" });
+      const updated = await storage.getSession(req.params.id);
+      if (updated) {
+        io.emit("session:updated", updated);
       }
 
-      await whatsappManager.resetSessionAuth(req.params.id);
-
-      io.emit("session:reconnecting", { id: req.params.id });
-
-      res.json({ message: "Auth reset initiated", sessionId: req.params.id });
+      res.json({ message: "Session stopped", sessionId: req.params.id });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   app.post("/api/sessions/:id/qr", async (req, res) => {
+    const sessionId = req.params.id;
+    console.log(`[routes][sessions][${sessionId}] qr requested`);
+
     try {
       if (!ensureRole(req, res, ["admin", "supervisor"])) {
         return;
       }
-      const session = await storage.getSession(req.params.id);
+      const session = await storage.getSession(sessionId);
       if (!session) {
         return res.status(404).json({ error: "Session not found" });
+      }
+
+      if (sessionBusyLocks.has(sessionId)) {
+        console.warn(`[routes][sessions][${sessionId}] qr blocked: busy`);
+        return res.status(409).json({
+          error: "busy",
+          message: "Session is busy",
+          sessionId,
+        });
       }
 
       const schema = z.object({
@@ -501,12 +840,204 @@ export async function registerRoutes(
       });
       const { windowMs } = schema.parse(req.body ?? {});
 
-      const result = await whatsappManager.openQrWindow(req.params.id, windowMs);
+      const result = await withTimeout(
+        whatsappManager.openQrWindow(sessionId, windowMs),
+        QR_ROUTE_TIMEOUT_MS,
+        `open qr window ${sessionId}`
+      );
+      console.log(
+        `[routes][sessions][${sessionId}] qr result (hasQr=${Boolean(result.qrCode)})`
+      );
       res.json(result);
     } catch (error: any) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: error.errors });
       }
+      console.error(
+        `[routes][sessions][${sessionId}] qr error:`,
+        error?.message ?? error
+      );
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/proxy-servers", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const proxies = await storage.getProxyServers();
+      res.json(proxies);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/proxy-servers/:id", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const proxy = await storage.getProxyServer(req.params.id);
+      if (!proxy) {
+        return res.status(404).json({ error: "ProxyServer not found" });
+      }
+      res.json(proxy);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/proxy-servers", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin"])) {
+        return;
+      }
+      const schema = insertProxyServerSchema.pick({
+        name: true,
+        scheme: true,
+        host: true,
+        port: true,
+        enabled: true,
+      });
+      const payload = schema.parse(req.body ?? {});
+      const cleaned = {
+        ...payload,
+        name: payload.name.trim(),
+        host: payload.host.trim(),
+      };
+      const hostError = validateProxyHost(cleaned.host);
+      if (hostError) {
+        return res.status(400).json({ error: hostError });
+      }
+      const proxy = await storage.createProxyServer({
+        ...cleaned,
+        scheme: "socks5",
+        status: "offline",
+      });
+      if (proxyMonitor) {
+        void proxyMonitor.checkNow(proxy.id);
+      }
+      if (io) {
+        io.emit("proxy:updated", {
+          id: proxy.id,
+          status: proxy.status,
+          lastPublicIp: proxy.lastPublicIp ?? null,
+          latencyMs: proxy.latencyMs ?? null,
+          lastCheckAt: proxy.lastCheckAt ?? null,
+          lastSeenAt: proxy.lastSeenAt ?? null,
+        });
+      }
+      res.status(201).json(proxy);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch("/api/proxy-servers/:id", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin"])) {
+        return;
+      }
+      const schema = insertProxyServerSchema.pick({
+        name: true,
+        scheme: true,
+        host: true,
+        port: true,
+        enabled: true,
+      }).partial();
+      const payload = schema.parse(req.body ?? {});
+      const cleaned: Record<string, any> = { ...payload };
+      if (typeof cleaned.name === "string") {
+        cleaned.name = cleaned.name.trim();
+      }
+      if (typeof cleaned.host === "string") {
+        cleaned.host = cleaned.host.trim();
+      }
+      if (cleaned.host) {
+        const hostError = validateProxyHost(cleaned.host);
+        if (hostError) {
+          return res.status(400).json({ error: hostError });
+        }
+      }
+      if (cleaned.scheme && cleaned.scheme !== "socks5") {
+        return res.status(400).json({ error: "Scheme inválido" });
+      }
+      const proxy = await storage.updateProxyServer(req.params.id, cleaned);
+      if (!proxy) {
+        return res.status(404).json({ error: "ProxyServer not found" });
+      }
+      let finalProxy = proxy;
+      if (payload.enabled === false) {
+        const updated = await storage.updateProxyServer(proxy.id, {
+          status: "offline",
+          lastError: "disabled",
+          lastCheckAt: new Date(),
+        });
+        if (updated) {
+          finalProxy = updated;
+        }
+      } else if (payload.host || payload.port || payload.enabled === true) {
+        void proxyMonitor.checkNow(proxy.id);
+      }
+      if (io) {
+        io.emit("proxy:updated", {
+          id: finalProxy.id,
+          status: finalProxy.status,
+          lastPublicIp: finalProxy.lastPublicIp ?? null,
+          latencyMs: finalProxy.latencyMs ?? null,
+          lastCheckAt: finalProxy.lastCheckAt ?? null,
+          lastSeenAt: finalProxy.lastSeenAt ?? null,
+        });
+      }
+      res.json(finalProxy);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/proxy-servers/:id", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin"])) {
+        return;
+      }
+      const proxy = await storage.disableProxyServer(req.params.id);
+      if (!proxy) {
+        return res.status(404).json({ error: "ProxyServer not found" });
+      }
+      if (io) {
+        io.emit("proxy:updated", {
+          id: proxy.id,
+          status: proxy.status,
+          lastPublicIp: proxy.lastPublicIp ?? null,
+          latencyMs: proxy.latencyMs ?? null,
+          lastCheckAt: proxy.lastCheckAt ?? null,
+          lastSeenAt: proxy.lastSeenAt ?? null,
+        });
+      }
+      res.status(204).send();
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/proxy-servers/:id/check", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin"])) {
+        return;
+      }
+      const updated = await proxyMonitor.checkNow(req.params.id);
+      if (!updated) {
+        return res.status(404).json({ error: "ProxyServer not found" });
+      }
+      res.json(updated);
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
@@ -1022,6 +1553,49 @@ export async function registerRoutes(
       
       res.json(campaign);
     } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Bulk upload debtors directly into a campaign (so CampaignEngine won't claim orphans).
+  app.post("/api/campaigns/:id/debtors/bulk", async (req, res) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user) {
+        return res.status(401).json({ error: "No autenticado" });
+      }
+
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+      if (isExecutive(user) && campaign.ownerUserId !== user.id) {
+        return res.status(403).json({ error: "No autorizado" });
+      }
+
+      const debtors = z.array(insertDebtorSchema).parse(req.body);
+      const payload = debtors.map((debtor) => {
+        const next: any = { ...debtor, campaignId: campaign.id };
+        if (isExecutive(user)) {
+          next.ownerUserId = user.id;
+        }
+        return next;
+      });
+
+      const created = await storage.createDebtors(payload);
+
+      await storage.createSystemLog({
+        level: "info",
+        source: "debtors",
+        message: `Bulk uploaded ${created.length} debtors to campaign ${campaign.name}`,
+        metadata: { campaignId: campaign.id, count: created.length },
+      });
+
+      res.status(201).json(created);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
       res.status(500).json({ error: error.message });
     }
   });
@@ -1684,7 +2258,13 @@ export async function registerRoutes(
       });
     } catch (error: any) {
       if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: error.errors });
+        // The frontend expects a human-readable string in `message`/`error`.
+        // Keep structured details for debugging/UI rendering.
+        return res.status(400).json({
+          message: "Datos invalidos",
+          error: "Validation error",
+          details: error.errors,
+        });
       }
       res.status(500).json({ error: error.message });
     }
@@ -1791,6 +2371,44 @@ export async function registerRoutes(
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: error.errors });
       }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/users/:id", async (req, res) => {
+    try {
+      const actor = ensureRole(req, res, ["admin"]);
+      if (!actor) {
+        return;
+      }
+
+      const existing = await storage.getUser(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (existing.id === actor.id) {
+        return res.status(409).json({ error: "No puedes eliminar tu propio usuario" });
+      }
+
+      if (existing.role === "admin" && existing.active) {
+        const adminCount = await storage.getActiveAdminCount();
+        if (adminCount <= 1) {
+          return res.status(409).json({ error: "No se puede eliminar al ultimo admin activo" });
+        }
+      }
+
+      await storage.deleteUser(existing.id);
+
+      await storage.createSystemLog({
+        level: "warning",
+        source: "users",
+        message: `Deleted user ${existing.username}`,
+        metadata: { userId: existing.id, deletedBy: actor.id },
+      });
+
+      res.status(204).send();
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
@@ -2152,5 +2770,6 @@ export async function registerRoutes(
 
   return httpServer;
 }
+
 
 

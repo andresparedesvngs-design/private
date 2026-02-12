@@ -14,6 +14,7 @@ import Messages from "@/pages/Messages";
 import SystemLogs from "@/pages/SystemLogs";
 import Settings from "@/pages/Settings";
 import Users from "@/pages/Users";
+import ProxyServers from "@/pages/ProxyServers";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -27,6 +28,7 @@ function Router() {
       <Route path="/messages" component={Messages} />
       <Route path="/logs" component={SystemLogs} />
       <Route path="/settings" component={Settings} />
+      <Route path="/proxy-servers" component={ProxyServers} />
       <Route path="/users" component={Users} />
       <Route component={NotFound} />
     </Switch>

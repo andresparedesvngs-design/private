@@ -22,7 +22,8 @@ import {
   LogOut,
   ShieldAlert,
   Terminal,
-  Database
+  Database,
+  Server
 } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useAuthMe, useLogout } from "@/lib/api";
@@ -93,6 +94,12 @@ export function AppSidebar() {
       url: "/settings",
       icon: Settings,
       roles: ["admin", "supervisor", "executive"],
+    },
+    {
+      title: "Proxy Servers",
+      url: "/proxy-servers",
+      icon: Server,
+      roles: ["admin"],
     },
     {
       title: "Usuarios/Permisos",

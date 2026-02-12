@@ -62,6 +62,11 @@ export function useSocket() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     });
 
+    socket.on('proxy:updated', () => {
+      queryClient.invalidateQueries({ queryKey: ['proxy-servers'] });
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+    });
+
     socket.on('pool:updated', () => {
       queryClient.invalidateQueries({ queryKey: ['pools'] });
     });
@@ -114,6 +119,7 @@ export function useSocket() {
       socket.off('session:ready');
       socket.off('session:auth_failed');
       socket.off('session:disconnected');
+      socket.off('proxy:updated');
       socket.off('pool:updated');
       socket.off('campaign:started');
       socket.off('campaign:paused');

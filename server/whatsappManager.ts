@@ -32,6 +32,28 @@ export type VerifyNowResult = {
   }>;
 };
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+const DESTROY_TIMEOUT_MS = (() => {
+  const raw = process.env.WHATSAPP_DESTROY_TIMEOUT_MS;
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 8000;
+})();
+
+const RESET_AUTH_DESTROY_TIMEOUT_MS = (() => {
+  const raw = process.env.WHATSAPP_RESET_AUTH_DESTROY_TIMEOUT_MS;
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 15000;
+})();
+
+const RESET_AUTH_CREATE_TIMEOUT_MS = (() => {
+  const raw = process.env.WHATSAPP_RESET_AUTH_CREATE_TIMEOUT_MS;
+  const parsed = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30000;
+})();
+
 const clientAny = Client as any;
 if (!clientAny.__injectPatched) {
   const originalInject = clientAny.prototype?.inject;
@@ -107,6 +129,30 @@ class WhatsAppManager {
     this.sessionDisconnectHandler = handler;
   }
 
+  private async runWithTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    label: string,
+    sessionId?: string
+  ): Promise<T> {
+    return await new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const scoped = sessionId ? `[wa][${sessionId}] ` : "";
+        reject(new Error(`${scoped}${label} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      promise
+        .then((value) => {
+          clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+    });
+  }
+
   private isManualQrMode(): boolean {
     return String(process.env.WHATSAPP_QR_MANUAL).toLowerCase() === "true";
   }
@@ -142,6 +188,7 @@ class WhatsAppManager {
     sessionId: string,
     windowMs?: number
   ): Promise<{ qrCode: string | null; expiresAt: string | null }> {
+    console.log(`[wa][${sessionId}] openQrWindow requested (windowMs=${windowMs ?? "default"})`);
     const duration = windowMs && windowMs > 0 ? windowMs : this.getQrWindowMs();
     const expiresAtMs = Date.now() + duration;
     this.qrWindowUntil.set(sessionId, expiresAtMs);
@@ -432,15 +479,22 @@ class WhatsAppManager {
     errorMessage?: string
   ): Promise<void> {
     const wasConnected = whatsappClient.status === "connected";
+    const disconnectedAt = new Date();
     whatsappClient.status = "disconnected";
-    whatsappClient.lastVerifiedAt = new Date();
+    whatsappClient.lastVerifiedAt = disconnectedAt;
     whatsappClient.lastVerifiedOk = false;
     whatsappClient.lastVerifyError = errorMessage ?? reason;
 
     this.clearQrWindow(sessionId);
     this.stopIncomingPolling(sessionId);
 
-    await storage.updateSession(sessionId, { status: "disconnected" });
+    const persistedSession = await storage.getSession(sessionId);
+    await storage.updateSession(sessionId, {
+      status: "disconnected",
+      disconnectCount: (persistedSession?.disconnectCount ?? 0) + 1,
+      lastDisconnectAt: disconnectedAt,
+      lastDisconnectReason: errorMessage ?? reason,
+    });
 
     if (wasConnected) {
       await storage.createSystemLog({
@@ -833,7 +887,36 @@ class WhatsAppManager {
     }
 
     const sessionRecord = await storage.getSession(sessionId);
-    const sessionPurpose = sessionRecord?.purpose ?? "default";
+    if (!sessionRecord) {
+      throw new Error(`Session not found in database: ${sessionId}`);
+    }
+
+    const sessionPurpose = sessionRecord.purpose ?? "default";
+    const resolvedAuthClientId = sessionRecord.authClientId ?? sessionId;
+    const proxyServerId = sessionRecord.proxyServerId ?? null;
+    let proxyEndpoint: string | null = null;
+
+    if (!sessionRecord.authClientId) {
+      await storage.updateSession(sessionId, { authClientId: resolvedAuthClientId });
+    }
+
+    console.log(
+      `[wa][${sessionId}] createSession start (authClientId=${resolvedAuthClientId}, purpose=${sessionPurpose})`
+    );
+
+    if (proxyServerId) {
+      const proxyServer = await storage.getProxyServer(proxyServerId);
+      if (!proxyServer || !proxyServer.enabled) {
+        await storage.createSystemLog({
+          level: "error",
+          source: "proxy",
+          message: `ProxyServer unavailable for session ${sessionId}`,
+          metadata: { sessionId, proxyServerId },
+        });
+        throw new Error("ProxyServer unavailable");
+      }
+      proxyEndpoint = `${proxyServer.scheme}://${proxyServer.host}:${proxyServer.port}`;
+    }
 
     const resolveChromePath = () => {
       const envPath = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
@@ -872,10 +955,16 @@ class WhatsAppManager {
       puppeteerArgs.push(`--user-agent=${userAgent}`);
     }
 
+    if (proxyEndpoint) {
+      puppeteerArgs.push(`--proxy-server=${proxyEndpoint}`);
+      puppeteerArgs.push("--disable-webrtc");
+      puppeteerArgs.push("--disable-features=WebRtcHideLocalIpsWithMdns");
+    }
+
     // CONFIGURACIÓN CORREGIDA CON LOCAL AUTH
     const client = new Client({
       authStrategy: new LocalAuth({
-        clientId: sessionId, // ESTA LÍNEA ES LA CLAVE
+        clientId: resolvedAuthClientId,
         dataPath: './.wwebjs_auth'
       }),
       puppeteer: {
@@ -946,7 +1035,7 @@ class WhatsAppManager {
         return;
       }
 
-      console.log('QR Code generated for session:', sessionId);
+      console.log(`[wa][${sessionId}] event:qr generated`);
       
       try {
         const qrDataUrl = await QRCode.toDataURL(qr);
@@ -970,13 +1059,13 @@ class WhatsAppManager {
     });
 
     client.on('ready', async () => {
-      console.log('WhatsApp client ready:', sessionId);
+      console.log(`[wa][${sessionId}] event:ready`);
 
       await markConnected("ready");
     });
 
     client.on('authenticated', async () => {
-      console.log('Client authenticated:', sessionId);
+      console.log(`[wa][${sessionId}] event:authenticated`);
       whatsappClient.status = 'authenticated';
 
       try {
@@ -1046,7 +1135,7 @@ class WhatsAppManager {
     });
 
     client.on('change_state', async (state) => {
-      console.log('WhatsApp state changed:', sessionId, state);
+      console.log(`[wa][${sessionId}] event:change_state -> ${state}`);
 
       if (state === 'CONNECTED' && whatsappClient.status !== 'connected') {
         try {
@@ -1058,13 +1147,16 @@ class WhatsAppManager {
     });
 
     client.on('auth_failure', async (msg) => {
-      console.error('Authentication failed:', sessionId, msg);
+      console.error(`[wa][${sessionId}] event:auth_failure ->`, msg);
       whatsappClient.status = 'auth_failed';
       this.clearQrWindow(sessionId);
       this.stopIncomingPolling(sessionId);
       
+      const sessionSnapshot = await storage.getSession(sessionId);
       await storage.updateSession(sessionId, {
-        status: 'auth_failed'
+        status: 'auth_failed',
+        authFailureCount: (sessionSnapshot?.authFailureCount ?? 0) + 1,
+        lastAuthFailureAt: new Date(),
       });
 
       if (this.io) {
@@ -1083,7 +1175,7 @@ class WhatsAppManager {
     });
 
     client.on('disconnected', async (reason) => {
-      console.log('Client disconnected:', sessionId, reason);
+      console.log(`[wa][${sessionId}] event:disconnected ->`, reason);
       if (authCheckTimer) {
         clearInterval(authCheckTimer);
         authCheckTimer = null;
@@ -1186,22 +1278,50 @@ class WhatsAppManager {
 
     try {
       await client.initialize();
-      console.log('WhatsApp client initialized:', sessionId);
+      console.log(`[wa][${sessionId}] createSession initialized`);
     } catch (error) {
-      console.error('Error initializing client:', error);
+      console.error(`[wa][${sessionId}] createSession initialize error:`, error);
       throw error;
     }
   }
 
-  async destroySession(sessionId: string): Promise<void> {
+  async destroySession(
+    sessionId: string,
+    options?: { removeAuth?: boolean }
+  ): Promise<void> {
     const whatsappClient = this.clients.get(sessionId);
+    const sessionRecord = await storage.getSession(sessionId);
+    const authClientId = sessionRecord?.authClientId ?? sessionId;
     this.clearQrWindow(sessionId);
-    
+    const removeAuth = options?.removeAuth ?? false;
+
+    console.log(
+      `[wa][${sessionId}] destroySession start (removeAuth=${removeAuth}, authClientId=${authClientId})`
+    );
+
     try {
       if (whatsappClient) {
         this.stopIncomingPolling(sessionId);
-        await whatsappClient.client.destroy();
+
+        // Remove early so other callers stop using a session that's being destroyed.
         this.clients.delete(sessionId);
+
+        const destroyTask = whatsappClient.client
+          .destroy()
+          .catch((error: any) => {
+            console.error("Error destroying WhatsApp client:", error);
+          });
+
+        const result = await Promise.race([
+          destroyTask.then(() => "done" as const),
+          sleep(DESTROY_TIMEOUT_MS).then(() => "timeout" as const),
+        ]);
+
+        if (result === "timeout") {
+          console.warn(
+            `WhatsApp client destroy timed out after ${DESTROY_TIMEOUT_MS}ms (sessionId=${sessionId})`
+          );
+        }
       }
       
       // NO eliminar la carpeta de autenticación si quieres persistencia
@@ -1213,7 +1333,24 @@ class WhatsAppManager {
         fs.rmSync(sessionDir, { recursive: true, force: true });
       }
       */
-      
+
+      if (removeAuth) {
+        // Guard against path traversal.
+        if (/^[a-zA-Z0-9_-]+$/.test(authClientId)) {
+          const sessionDir = path.join(process.cwd(), ".wwebjs_auth", `session-${authClientId}`);
+          try {
+            await fs.promises.rm(sessionDir, { recursive: true, force: true });
+          } catch (error: any) {
+            console.warn(
+              `Failed to remove auth folder for session ${sessionId} (${authClientId}):`,
+              error?.message ?? error
+            );
+          }
+        } else {
+          console.warn(`Skip removing auth folder due to invalid authClientId: ${authClientId}`);
+        }
+      }
+       
       await storage.updateSession(sessionId, {
         status: 'disconnected'
       });
@@ -1225,36 +1362,81 @@ class WhatsAppManager {
         metadata: {}
       });
 
-      console.log('Session destroyed:', sessionId);
+      console.log(`[wa][${sessionId}] destroySession completed`);
     } catch (error) {
-      console.error('Error destroying session:', error);
+      console.error(`[wa][${sessionId}] destroySession error:`, error);
     }
   }
 
   async resetSessionAuth(sessionId: string): Promise<void> {
+    const resetAt = new Date();
+    const session = await storage.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const oldAuthClientId = session.authClientId ?? sessionId;
+    const newAuthClientId = `${sessionId}-${Date.now()}`;
+
+    console.log(
+      `[wa][${sessionId}] resetSessionAuth start (oldAuthClientId=${oldAuthClientId}, newAuthClientId=${newAuthClientId})`
+    );
+
     try {
-      await this.destroySession(sessionId);
-
-      const sessionDir = path.join(process.cwd(), ".wwebjs_auth", `session-${sessionId}`);
-      if (fs.existsSync(sessionDir)) {
-        fs.rmSync(sessionDir, { recursive: true, force: true });
-      }
-
       await storage.updateSession(sessionId, {
-        status: "initializing",
+        status: "reconnecting",
         qrCode: null,
       });
 
-      await this.createSession(sessionId);
+      await this.runWithTimeout(
+        this.destroySession(sessionId),
+        RESET_AUTH_DESTROY_TIMEOUT_MS,
+        "destroySession",
+        sessionId
+      );
+
+      if (/^[a-zA-Z0-9_-]+$/.test(oldAuthClientId)) {
+        const sessionDir = path.join(process.cwd(), ".wwebjs_auth", `session-${oldAuthClientId}`);
+        if (fs.existsSync(sessionDir)) {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+        }
+      } else {
+        console.warn(
+          `[wa][${sessionId}] skip deleting auth folder due to invalid oldAuthClientId=${oldAuthClientId}`
+        );
+      }
+
+      await storage.updateSession(sessionId, {
+        authClientId: newAuthClientId,
+        status: "initializing",
+        qrCode: null,
+        resetAuthCount: (session.resetAuthCount ?? 0) + 1,
+        lastResetAuthAt: resetAt,
+      });
+
+      await this.runWithTimeout(
+        this.createSession(sessionId),
+        RESET_AUTH_CREATE_TIMEOUT_MS,
+        "createSession",
+        sessionId
+      );
 
       await storage.createSystemLog({
         level: "info",
         source: "whatsapp",
         message: `Session ${sessionId} auth reset`,
-        metadata: {},
+        metadata: { oldAuthClientId, newAuthClientId },
       });
+      console.log(`[wa][${sessionId}] resetSessionAuth completed`);
     } catch (error) {
-      console.error("Error resetting auth:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[wa][${sessionId}] resetSessionAuth error:`, message);
+      await storage.updateSession(sessionId, { status: "auth_failed" });
+      await storage.createSystemLog({
+        level: "error",
+        source: "whatsapp",
+        message: `Session ${sessionId} auth reset failed`,
+        metadata: { error: message, oldAuthClientId },
+      });
       throw error;
     }
   }
@@ -1416,7 +1598,7 @@ class WhatsAppManager {
     let verified = 0;
     let failed = 0;
 
-    for (const [sessionId, whatsappClient] of this.clients.entries()) {
+    for (const [sessionId, whatsappClient] of Array.from(this.clients.entries())) {
       checked += 1;
       let ok = false;
       let error: string | undefined;
@@ -1522,3 +1704,4 @@ class WhatsAppManager {
 }
 
 export const whatsappManager = new WhatsAppManager();
+

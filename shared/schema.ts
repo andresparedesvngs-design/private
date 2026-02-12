@@ -10,6 +10,32 @@ export const insertSessionSchema = z.object({
   messagesSent: z.number().default(0),
   lastActive: z.date().optional().nullable(),
   purpose: z.string().optional().default("default"),
+  proxyServerId: z.string().optional().nullable(),
+  proxyLocked: z.boolean().optional(),
+  authClientId: z.string().optional().nullable(),
+  disconnectCount: z.number().default(0),
+  lastDisconnectAt: z.date().optional().nullable(),
+  lastDisconnectReason: z.string().optional().nullable(),
+  authFailureCount: z.number().default(0),
+  lastAuthFailureAt: z.date().optional().nullable(),
+  resetAuthCount: z.number().default(0),
+  lastResetAuthAt: z.date().optional().nullable(),
+  reconnectCount: z.number().default(0),
+  lastReconnectAt: z.date().optional().nullable(),
+});
+
+export const insertProxyServerSchema = z.object({
+  name: z.string(),
+  scheme: z.enum(["socks5"]).default("socks5"),
+  host: z.string(),
+  port: z.number().int().min(1).max(65535),
+  enabled: z.boolean().default(true),
+  status: z.enum(["online", "degraded", "offline"]).default("offline"),
+  lastPublicIp: z.string().optional().nullable(),
+  lastCheckAt: z.date().optional().nullable(),
+  lastSeenAt: z.date().optional().nullable(),
+  latencyMs: z.number().optional().nullable(),
+  lastError: z.string().optional().nullable(),
 });
 
 export const insertPoolSchema = z.object({
@@ -170,6 +196,32 @@ const sessionSchema = new mongoose.Schema({
   messagesSent: { type: Number, default: 0 },
   lastActive: { type: Date, default: null },
   purpose: { type: String, default: "default", index: true },
+  proxyServerId: { type: mongoose.Schema.Types.ObjectId, ref: "ProxyServer", default: null },
+  proxyLocked: { type: Boolean, default: true },
+  authClientId: { type: String, default: null, index: true },
+  disconnectCount: { type: Number, default: 0 },
+  lastDisconnectAt: { type: Date, default: null },
+  lastDisconnectReason: { type: String, default: null },
+  authFailureCount: { type: Number, default: 0 },
+  lastAuthFailureAt: { type: Date, default: null },
+  resetAuthCount: { type: Number, default: 0 },
+  lastResetAuthAt: { type: Date, default: null },
+  reconnectCount: { type: Number, default: 0 },
+  lastReconnectAt: { type: Date, default: null },
+}, { timestamps: true });
+
+const proxyServerSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  scheme: { type: String, enum: ["socks5"], default: "socks5" },
+  host: { type: String, required: true },
+  port: { type: Number, required: true },
+  enabled: { type: Boolean, default: true },
+  status: { type: String, enum: ["online", "degraded", "offline"], default: "offline", index: true },
+  lastPublicIp: { type: String, default: null },
+  lastCheckAt: { type: Date, default: null },
+  lastSeenAt: { type: Date, default: null },
+  latencyMs: { type: Number, default: null },
+  lastError: { type: String, default: null },
 }, { timestamps: true });
 
 const poolSchema = new mongoose.Schema({
@@ -325,6 +377,7 @@ const whatsappVerificationSchema = new mongoose.Schema({
 
 // Modelos de Mongoose
 export const SessionModel = mongoose.model("Session", sessionSchema);
+export const ProxyServerModel = mongoose.model("ProxyServer", proxyServerSchema);
 export const PoolModel = mongoose.model("Pool", poolSchema);
 export const GsmLineModel = mongoose.model("GsmLine", gsmLineSchema);
 export const GsmPoolModel = mongoose.model("GsmPool", gsmPoolSchema);
@@ -375,6 +428,33 @@ export type Session = BaseDocument & {
   messagesSent: number;
   lastActive?: Date | null;
   purpose?: string;
+  proxyServerId?: string | null;
+  proxyLocked?: boolean;
+  authClientId?: string | null;
+  disconnectCount?: number;
+  lastDisconnectAt?: Date | null;
+  lastDisconnectReason?: string | null;
+  authFailureCount?: number;
+  lastAuthFailureAt?: Date | null;
+  resetAuthCount?: number;
+  lastResetAuthAt?: Date | null;
+  reconnectCount?: number;
+  lastReconnectAt?: Date | null;
+};
+
+export type InsertProxyServer = z.infer<typeof insertProxyServerSchema>;
+export type ProxyServer = BaseDocument & {
+  name: string;
+  scheme: "socks5";
+  host: string;
+  port: number;
+  enabled: boolean;
+  status: "online" | "degraded" | "offline";
+  lastPublicIp?: string | null;
+  lastCheckAt?: Date | null;
+  lastSeenAt?: Date | null;
+  latencyMs?: number | null;
+  lastError?: string | null;
 };
 
 export type InsertPool = z.infer<typeof insertPoolSchema>;

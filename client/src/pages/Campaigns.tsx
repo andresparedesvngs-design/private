@@ -17,10 +17,12 @@ import {
   usePools,
   useSessions,
   useDebtors,
+  useContacts,
   useMessages,
   useGsmLines,
   useGsmPools,
   useCreateCampaign,
+  useUpdateCampaign,
   useStartCampaign,
   usePauseCampaign,
   useCreatePool,
@@ -33,6 +35,7 @@ import {
   useDeleteGsmPool,
   useRetryFailedCampaign,
   useCampaignPauseSettings,
+  useBulkUploadCampaignDebtors,
 } from "@/lib/api";
 import { 
   Plus, 
@@ -55,7 +58,7 @@ import {
   Eye
 } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import * as XLSX from "xlsx";
 import { getSocket } from "@/lib/socket";
@@ -82,6 +85,31 @@ export default function Campaigns() {
   const [debtorRangeEnd, setDebtorRangeEnd] = useState("");
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
   const [detailsCampaign, setDetailsCampaign] = useState<any>(null);
+  const [isEditCampaignOpen, setIsEditCampaignOpen] = useState(false);
+  const [editingCampaign, setEditingCampaign] = useState<any>(null);
+  const [editTab, setEditTab] = useState<"config" | "debtors">("config");
+
+  const [editCampaignName, setEditCampaignName] = useState("");
+  const [editSelectedPoolId, setEditSelectedPoolId] = useState("");
+  const [editCampaignChannel, setEditCampaignChannel] = useState<
+    "whatsapp" | "sms" | "whatsapp_fallback_sms"
+  >("whatsapp");
+  const [editSelectedSmsPoolId, setEditSelectedSmsPoolId] = useState("");
+  const [editMessageTemplate, setEditMessageTemplate] = useState("");
+  const [editMessageRotationStrategy, setEditMessageRotationStrategy] = useState<
+    "none" | "random" | "round_robin"
+  >("none");
+  const [editMessageVariantsCount, setEditMessageVariantsCount] = useState(0);
+  const [editMessageVariantTemplates, setEditMessageVariantTemplates] = useState<string[]>([]);
+  const [editDebtorRangeStart, setEditDebtorRangeStart] = useState("");
+  const [editDebtorRangeEnd, setEditDebtorRangeEnd] = useState("");
+
+  const editDebtorsFileInputRef = useRef<HTMLInputElement>(null);
+  const [editDebtorsFileName, setEditDebtorsFileName] = useState("");
+  const [editDebtorsPending, setEditDebtorsPending] = useState<any[]>([]);
+  const [editDebtorsSkipped, setEditDebtorsSkipped] = useState(0);
+  const [editDebtorsMetadataLabels, setEditDebtorsMetadataLabels] = useState<string[]>([]);
+  const [editDebtorsUploading, setEditDebtorsUploading] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [cooldowns, setCooldowns] = useState<Record<string, { endAt: number; reason?: string }>>({});
   const [cooldownNow, setCooldownNow] = useState(Date.now());
@@ -174,11 +202,13 @@ export default function Campaigns() {
   const { data: gsmPools } = useGsmPools(true);
   const { data: pauseSettings } = useCampaignPauseSettings(canManagePools);
   const { data: debtors } = useDebtors();
+  const { data: contacts } = useContacts();
   const { data: campaignMessages, isLoading: campaignMessagesLoading } = useMessages(
     detailsCampaign?.id,
     Boolean(detailsCampaign?.id)
   );
   const createCampaign = useCreateCampaign();
+  const updateCampaign = useUpdateCampaign();
   const startCampaign = useStartCampaign();
   const pauseCampaign = usePauseCampaign();
   const createPool = useCreatePool();
@@ -190,6 +220,7 @@ export default function Campaigns() {
   const createGsmPool = useCreateGsmPool();
   const deleteGsmPool = useDeleteGsmPool();
   const retryFailedCampaign = useRetryFailedCampaign();
+  const bulkUploadCampaignDebtors = useBulkUploadCampaignDebtors();
 
   const [editingPool, setEditingPool] = useState<any>(null);
   const [isEditPoolOpen, setIsEditPoolOpen] = useState(false);
@@ -213,6 +244,49 @@ export default function Campaigns() {
     })
   );
   const debtorById = new Map((debtors ?? []).map((debtor) => [debtor.id, debtor]));
+
+  const normalizePhoneLookup = (value?: string | null) => {
+    const digits = String(value ?? "").replace(/\D/g, "");
+    return digits || "";
+  };
+
+  const contactByPhoneLookup = new Map<string, { name: string; phone: string }>();
+  for (const contact of contacts ?? []) {
+    const normalized = normalizePhoneLookup(contact.phone);
+    if (!normalized) continue;
+
+    if (!contactByPhoneLookup.has(normalized)) {
+      contactByPhoneLookup.set(normalized, {
+        name: contact.name ?? "",
+        phone: contact.phone ?? "",
+      });
+    }
+
+    const suffix = normalized.slice(-8);
+    if (suffix.length >= 8 && !contactByPhoneLookup.has(`s:${suffix}`)) {
+      contactByPhoneLookup.set(`s:${suffix}`, {
+        name: contact.name ?? "",
+        phone: contact.phone ?? "",
+      });
+    }
+  }
+
+  const resolveDebtorDisplayFromMessage = (message: any) => {
+    const debtor = message.debtorId ? debtorById.get(message.debtorId) : undefined;
+    const phoneCandidate = message.phone ?? debtor?.phone ?? null;
+    const normalizedPhone = normalizePhoneLookup(phoneCandidate);
+    const suffix = normalizedPhone.slice(-8);
+    const contact =
+      (normalizedPhone ? contactByPhoneLookup.get(normalizedPhone) : undefined) ??
+      (suffix.length >= 8 ? contactByPhoneLookup.get(`s:${suffix}`) : undefined);
+
+    return {
+      debtor,
+      contact,
+      displayName: debtor?.name ?? contact?.name ?? "-",
+      displayPhone: message.phone ?? debtor?.phone ?? contact?.phone ?? "-",
+    };
+  };
 
   const campaignDebtors = detailsCampaign
     ? (debtors ?? []).filter((debtor) => debtor.campaignId === detailsCampaign.id)
@@ -510,15 +584,15 @@ export default function Campaigns() {
     }));
 
     const messageRows = campaignMessageList.map((message) => {
-      const debtor = message.debtorId ? debtorById.get(message.debtorId) : undefined;
+      const resolved = resolveDebtorDisplayFromMessage(message);
       return {
         Fecha: message.sentAt
           ? new Date(message.sentAt).toLocaleString()
           : message.createdAt
           ? new Date(message.createdAt).toLocaleString()
           : "",
-        Deudor: debtor?.name ?? "",
-        Telefono: message.phone ?? debtor?.phone ?? "",
+        Deudor: resolved.displayName === "-" ? "" : resolved.displayName,
+        Telefono: resolved.displayPhone === "-" ? "" : resolved.displayPhone,
         Estado: messageStatusLabels[message.status ?? "pending"] ?? message.status ?? "",
         Canal: message.channel ?? "",
         Mensaje: message.content ?? "",
@@ -596,6 +670,9 @@ export default function Campaigns() {
   const requiresWhatsappPool = campaignChannel !== "sms";
   const requiresSmsPool =
     campaignChannel === "sms" || campaignChannel === "whatsapp_fallback_sms";
+  const editRequiresWhatsappPool = editCampaignChannel !== "sms";
+  const editRequiresSmsPool =
+    editCampaignChannel === "sms" || editCampaignChannel === "whatsapp_fallback_sms";
 
   const handleVariantCountChange = (rawValue: string) => {
     const parsed = parseInt(rawValue, 10);
@@ -619,6 +696,168 @@ export default function Campaigns() {
       next[index] = value;
       return next;
     });
+  };
+
+  const handleEditVariantCountChange = (rawValue: string) => {
+    const parsed = parseInt(rawValue, 10);
+    const nextCount = Number.isFinite(parsed) ? Math.max(0, Math.min(20, parsed)) : 0;
+    setEditMessageVariantsCount(nextCount);
+    setEditMessageVariantTemplates((prev) => {
+      const next = prev.slice(0, nextCount);
+      while (next.length < nextCount) {
+        next.push("");
+      }
+      return next;
+    });
+  };
+
+  const handleEditVariantTemplateChange = (index: number, value: string) => {
+    setEditMessageVariantTemplates((prev) => {
+      const next = [...prev];
+      while (next.length <= index) {
+        next.push("");
+      }
+      next[index] = value;
+      return next;
+    });
+  };
+
+  const debtorImportNormalizeHeader = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]/g, "");
+
+  const debtorImportNormalizeMetadataKey = (header: string) => {
+    const normalized = debtorImportNormalizeHeader(header);
+    if (!normalized) return normalized;
+
+    const aliasMap: Record<string, string> = {
+      nombre: "name",
+      nombres: "name",
+      fullname: "name",
+      nombresyapellidos: "name",
+      razonsocial: "name",
+      cliente: "name",
+      nombreejecutivo: "nombre_ejecutivo",
+      fonoejecutivo: "fono_ejecutivo",
+      telefonoejecutivo: "fono_ejecutivo",
+      ejecutivofono: "fono_ejecutivo",
+      ejecutivonombre: "nombre_ejecutivo",
+      telefono: "phone",
+      telefon: "phone",
+      celular: "phone",
+      movil: "phone",
+      movil1: "phone",
+      telefono1: "phone",
+      phone: "phone",
+      deuda: "debt",
+      monto: "debt",
+      saldo: "debt",
+      deuda_total: "debt",
+      total: "debt",
+    };
+
+    return aliasMap[normalized] ?? normalized;
+  };
+
+  const debtorImportDetectDelimiter = (headerLine: string) => {
+    const commaCount = (headerLine.match(/,/g) ?? []).length;
+    const semicolonCount = (headerLine.match(/;/g) ?? []).length;
+    return semicolonCount > commaCount ? ";" : ",";
+  };
+
+  const debtorImportParseCsvLine = (line: string, delimiter: string): string[] => {
+    const cells: string[] = [];
+    let current = "";
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      const next = line[i + 1];
+
+      if (char === '"') {
+        if (inQuotes && next === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+        continue;
+      }
+
+      if (char === delimiter && !inQuotes) {
+        cells.push(current.trim());
+        current = "";
+        continue;
+      }
+
+      current += char;
+    }
+
+    cells.push(current.trim());
+    return cells;
+  };
+
+  const debtorImportFindHeaderIndex = (headersNormalized: string[], variants: string[]) => {
+    const normalizedVariants = variants.map(debtorImportNormalizeHeader);
+    return headersNormalized.findIndex((header) =>
+      normalizedVariants.some(
+        (variant) =>
+          header === variant || header.includes(variant) || variant.includes(header)
+      )
+    );
+  };
+
+  const debtorImportNormalizePhoneValue = (value: string | undefined) => {
+    if (!value) return "";
+    const hasPlus = value.trim().startsWith("+");
+    const digits = value.replace(/\D/g, "");
+    return hasPlus ? `+${digits}` : digits;
+  };
+
+  const debtorImportParseDebtValue = (value: string | undefined) => {
+    if (!value) return 0;
+    const cleaned = value.replace(/[^\d,.\-]/g, "").trim();
+    if (!cleaned) return 0;
+
+    const hasComma = cleaned.includes(",");
+    const hasDot = cleaned.includes(".");
+    let normalized = cleaned;
+
+    if (hasComma && hasDot) {
+      normalized = cleaned.replace(/\./g, "").replace(/,/g, ".");
+    } else if (hasComma && !hasDot) {
+      normalized = cleaned.replace(/,/g, ".");
+    }
+
+    const parsed = Number.parseFloat(normalized);
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.round(parsed);
+  };
+
+  const debtorImportNormalizeStatusValue = (value: string | undefined) => {
+    const normalized = debtorImportNormalizeHeader(value ?? "");
+    if (!normalized) return "disponible" as const;
+
+    const statusMap: Record<string, "disponible" | "procesando" | "completado" | "fallado"> = {
+      disponible: "disponible",
+      available: "disponible",
+      pending: "disponible",
+      procesando: "procesando",
+      processing: "procesando",
+      enproceso: "procesando",
+      completado: "completado",
+      completed: "completado",
+      finalizado: "completado",
+      fallado: "fallado",
+      failed: "fallado",
+      error: "fallado",
+    };
+
+    return statusMap[normalized] ?? "disponible";
   };
 
   const handleCreateCampaign = async () => {
@@ -697,6 +936,392 @@ export default function Campaigns() {
       setStep(1);
     } catch (error) {
       console.error('Failed to create campaign:', error);
+    }
+  };
+
+  const resetEditCampaignState = () => {
+    setEditingCampaign(null);
+    setEditTab("config");
+    setEditCampaignName("");
+    setEditSelectedPoolId("");
+    setEditCampaignChannel("whatsapp");
+    setEditSelectedSmsPoolId("");
+    setEditMessageTemplate("");
+    setEditMessageRotationStrategy("none");
+    setEditMessageVariantsCount(0);
+    setEditMessageVariantTemplates([]);
+    setEditDebtorRangeStart("");
+    setEditDebtorRangeEnd("");
+    setEditDebtorsFileName("");
+    setEditDebtorsPending([]);
+    setEditDebtorsSkipped(0);
+    setEditDebtorsMetadataLabels([]);
+    setEditDebtorsUploading(false);
+    if (editDebtorsFileInputRef.current) {
+      editDebtorsFileInputRef.current.value = "";
+    }
+  };
+
+  const handleOpenEditCampaign = (campaign: any) => {
+    const baseChannel = (campaign?.channel as string | undefined) ?? "whatsapp";
+    const resolvedChannel =
+      baseChannel === "whatsapp" && campaign?.fallbackSms
+        ? "whatsapp_fallback_sms"
+        : (baseChannel as "whatsapp" | "sms" | "whatsapp_fallback_sms");
+
+    setEditingCampaign(campaign);
+    setEditTab("config");
+    setEditCampaignName(String(campaign?.name ?? ""));
+    setEditSelectedPoolId(String(campaign?.poolId ?? ""));
+    setEditCampaignChannel(resolvedChannel);
+    setEditSelectedSmsPoolId(String(campaign?.smsPoolId ?? ""));
+    setEditMessageTemplate(String(campaign?.message ?? ""));
+    setEditMessageRotationStrategy(
+      (campaign?.messageRotationStrategy as "none" | "random" | "round_robin") ?? "none"
+    );
+    const variants = Array.isArray(campaign?.messageVariants) ? campaign.messageVariants : [];
+    setEditMessageVariantsCount(variants.length);
+    setEditMessageVariantTemplates(variants.map((v: any) => String(v ?? "")));
+    setEditDebtorRangeStart(
+      campaign?.debtorRangeStart ? String(campaign.debtorRangeStart) : ""
+    );
+    setEditDebtorRangeEnd(campaign?.debtorRangeEnd ? String(campaign.debtorRangeEnd) : "");
+
+    setEditDebtorsFileName("");
+    setEditDebtorsPending([]);
+    setEditDebtorsSkipped(0);
+    setEditDebtorsMetadataLabels([]);
+    setEditDebtorsUploading(false);
+    if (editDebtorsFileInputRef.current) {
+      editDebtorsFileInputRef.current.value = "";
+    }
+
+    setIsEditCampaignOpen(true);
+  };
+
+  const handleSaveEditedCampaign = async () => {
+    if (!editingCampaign) return;
+
+    const requiresWhatsappPool = editCampaignChannel !== "sms";
+    const requiresSmsPool =
+      editCampaignChannel === "sms" || editCampaignChannel === "whatsapp_fallback_sms";
+
+    if (!editCampaignName.trim() || !editMessageTemplate.trim()) {
+      alert("Por favor complete el nombre y la plantilla de mensaje");
+      return;
+    }
+
+    if (requiresWhatsappPool && !editSelectedPoolId) {
+      alert("Debes seleccionar un pool de WhatsApp");
+      return;
+    }
+
+    if (requiresSmsPool && !editSelectedSmsPoolId) {
+      alert("Debes seleccionar un pool SMS");
+      return;
+    }
+
+    const rawStart = editDebtorRangeStart.trim();
+    const rawEnd = editDebtorRangeEnd.trim();
+    const parsedStart = rawStart ? parsePositiveInt(rawStart) : null;
+    const parsedEnd = rawEnd ? parsePositiveInt(rawEnd) : null;
+
+    if (rawStart && parsedStart === null) {
+      alert("Rango inválido: 'Desde' debe ser un entero positivo");
+      return;
+    }
+
+    if (rawEnd && parsedEnd === null) {
+      alert("Rango inválido: 'Hasta' debe ser un entero positivo");
+      return;
+    }
+
+    if (parsedStart !== null && parsedEnd !== null && parsedEnd < parsedStart) {
+      alert('El rango es inválido. "Hasta" debe ser mayor o igual a "Desde".');
+      return;
+    }
+
+    const cleanedVariants = editMessageVariantTemplates
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0)
+      .filter((value) => value !== editMessageTemplate.trim());
+
+    const messageVariants = Array.from(new Set(cleanedVariants));
+
+    const rotationStrategy =
+      messageVariants.length > 0 && editMessageRotationStrategy === "none"
+        ? "random"
+        : editMessageRotationStrategy;
+
+    const fallbackSms = editCampaignChannel === "whatsapp_fallback_sms";
+    const poolId = requiresWhatsappPool ? editSelectedPoolId : null;
+    const smsPoolId = requiresSmsPool ? editSelectedSmsPoolId : null;
+
+    const payload: any = {
+      name: editCampaignName.trim(),
+      poolId,
+      channel: editCampaignChannel,
+      smsPoolId,
+      fallbackSms,
+      message: editMessageTemplate,
+      messageVariants,
+      messageRotationStrategy: rotationStrategy,
+      debtorRangeStart: parsedStart,
+      debtorRangeEnd: parsedEnd,
+    };
+
+    try {
+      await updateCampaign.mutateAsync({ id: editingCampaign.id, data: payload });
+      setIsEditCampaignOpen(false);
+      resetEditCampaignState();
+    } catch (error) {
+      console.error("Failed to update campaign:", error);
+      alert("Error al actualizar la campaña");
+    }
+  };
+
+  const handleEditDebtorsFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const isExcelFile = /\.(xlsx|xls)$/i.test(file.name);
+    const reader = new FileReader();
+
+    setEditDebtorsFileName(file.name);
+    setEditDebtorsPending([]);
+    setEditDebtorsSkipped(0);
+    setEditDebtorsMetadataLabels([]);
+
+    reader.onload = async (e) => {
+      let text = "";
+
+      if (isExcelFile) {
+        try {
+          const buffer = e.target?.result as ArrayBuffer;
+          const workbook = XLSX.read(buffer, { type: "array" });
+          const firstSheetName = workbook.SheetNames[0];
+          const firstSheet = workbook.Sheets[firstSheetName];
+          text = XLSX.utils.sheet_to_csv(firstSheet);
+        } catch (error) {
+          console.error("Failed to read Excel file:", error);
+          alert("No se pudo leer el archivo Excel");
+          return;
+        }
+      } else {
+        text = (e.target?.result as string) ?? "";
+      }
+
+      const lines = text.split(/\r?\n/).filter((line) => line.trim());
+      if (lines.length < 2) {
+        alert("El archivo debe tener al menos una fila de datos");
+        return;
+      }
+
+      let headerLineIndex = 0;
+      if (/^sep\\s*=/i.test(lines[0])) {
+        headerLineIndex = 1;
+      }
+
+      if (!lines[headerLineIndex]) {
+        alert("No se encontró la fila de encabezados en el archivo");
+        return;
+      }
+
+      const delimiter = debtorImportDetectDelimiter(lines[headerLineIndex]);
+      const headersRaw = debtorImportParseCsvLine(lines[headerLineIndex], delimiter);
+      const headersNormalized = headersRaw.map(debtorImportNormalizeHeader);
+
+      const headerVariants: Record<
+        "name" | "phone" | "debt" | "status" | "execName" | "execPhone",
+        string[]
+      > = {
+        name: [
+          "nombre",
+          "nombres",
+          "name",
+          "fullname",
+          "full name",
+          "cliente",
+          "contacto",
+          "razon social",
+          "razon_social",
+        ],
+        phone: [
+          "telefono",
+          "teléfono",
+          "phone",
+          "celular",
+          "movil",
+          "móvil",
+          "mobile",
+          "whatsapp",
+          "numero",
+          "número",
+          "phone number",
+          "phone_number",
+        ],
+        debt: ["deuda", "debt", "monto", "amount", "saldo", "balance", "importe", "valor", "total"],
+        status: ["estado", "status", "estatus", "situacion", "situación"],
+        execName: [
+          "nombre ejecutivo",
+          "nombre_ejecutivo",
+          "ejecutivo",
+          "ejecutivo nombre",
+          "executive name",
+          "agent name",
+          "gestor",
+          "gestor nombre",
+        ],
+        execPhone: [
+          "fono ejecutivo",
+          "fono_ejecutivo",
+          "telefono ejecutivo",
+          "telefono_ejecutivo",
+          "ejecutivo fono",
+          "executive phone",
+          "agent phone",
+          "gestor fono",
+          "gestor telefono",
+        ],
+      };
+
+      const nameIdx = debtorImportFindHeaderIndex(headersNormalized, headerVariants.name);
+      const phoneIdx = debtorImportFindHeaderIndex(headersNormalized, headerVariants.phone);
+      const debtIdx = debtorImportFindHeaderIndex(headersNormalized, headerVariants.debt);
+      const statusIdx = debtorImportFindHeaderIndex(headersNormalized, headerVariants.status);
+      const execNameIdx = debtorImportFindHeaderIndex(headersNormalized, headerVariants.execName);
+      const execPhoneIdx = debtorImportFindHeaderIndex(headersNormalized, headerVariants.execPhone);
+
+      if (nameIdx === -1 || phoneIdx === -1) {
+        alert(
+          `No pude encontrar columnas de nombre y telefono.\\n\\nEncabezados detectados: ${headersRaw.join(", ")}`
+        );
+        return;
+      }
+
+      const standardIndexes = new Set(
+        [nameIdx, phoneIdx, debtIdx, statusIdx, execNameIdx, execPhoneIdx].filter((idx) => idx >= 0)
+      );
+
+      const metadataFields = headersRaw
+        .map((header, index) => {
+          const key = debtorImportNormalizeMetadataKey(header) || `col${index + 1}`;
+          return { index, label: header.trim(), key };
+        })
+        .filter(({ index, key }) => !standardIndexes.has(index) && key.length > 0);
+
+      const debtorsToCreate: any[] = [];
+      let skippedRows = 0;
+
+      for (let i = headerLineIndex + 1; i < lines.length; i++) {
+        const cols = debtorImportParseCsvLine(lines[i], delimiter);
+        const name = cols[nameIdx]?.trim();
+        const phone = debtorImportNormalizePhoneValue(cols[phoneIdx]);
+
+        if (!name || !phone) {
+          skippedRows++;
+          continue;
+        }
+
+        const debtor: any = {
+          name,
+          phone,
+          debt: debtIdx !== -1 ? debtorImportParseDebtValue(cols[debtIdx]) : 0,
+          status: statusIdx !== -1 ? debtorImportNormalizeStatusValue(cols[statusIdx]) : "disponible",
+        };
+
+        const execName = execNameIdx !== -1 ? cols[execNameIdx]?.trim() : "";
+        const execPhone = execPhoneIdx !== -1 ? cols[execPhoneIdx]?.trim() : "";
+
+        if (execName || execPhone) {
+          debtor.metadata = debtor.metadata ?? {};
+          if (execName) {
+            debtor.metadata.nombre_ejecutivo = execName;
+          }
+          if (execPhone) {
+            debtor.metadata.fono_ejecutivo = execPhone;
+          }
+        }
+
+        if (metadataFields.length > 0) {
+          const metadata: Record<string, unknown> = {};
+          for (const field of metadataFields) {
+            const rawValue = cols[field.index];
+            if (!rawValue || !rawValue.trim()) continue;
+            metadata[field.key] = rawValue.trim();
+          }
+          if (Object.keys(metadata).length > 0) {
+            debtor.metadata = { ...(debtor.metadata ?? {}), ...metadata };
+          }
+        }
+
+        debtorsToCreate.push(debtor);
+      }
+
+      if (debtorsToCreate.length === 0) {
+        alert("No se encontraron deudores válidos en el archivo");
+        return;
+      }
+
+      setEditDebtorsPending(debtorsToCreate);
+      setEditDebtorsSkipped(skippedRows);
+      setEditDebtorsMetadataLabels(metadataFields.map((f) => f.label || f.key).filter(Boolean));
+    };
+
+    if (isExcelFile) {
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.readAsText(file);
+    }
+  };
+
+  const handleUploadEditDebtors = async () => {
+    if (!editingCampaign) return;
+    if (!editDebtorsPending.length) {
+      alert("Carga un archivo con deudores primero");
+      return;
+    }
+    if (editDebtorsUploading) return;
+
+    try {
+      setEditDebtorsUploading(true);
+      const chunkSize = 500;
+      let uploaded = 0;
+      for (let i = 0; i < editDebtorsPending.length; i += chunkSize) {
+        const chunk = editDebtorsPending.slice(i, i + chunkSize);
+        await bulkUploadCampaignDebtors.mutateAsync({
+          campaignId: editingCampaign.id,
+          debtors: chunk,
+        });
+        uploaded += chunk.length;
+      }
+
+      const metadataSummary =
+        editDebtorsMetadataLabels.length > 0
+          ? `\nColumnas extra guardadas como metadata: ${editDebtorsMetadataLabels
+              .slice(0, 6)
+              .join(", ")}${editDebtorsMetadataLabels.length > 6 ? "..." : ""}`
+          : "";
+
+      const skippedSummary =
+        editDebtorsSkipped > 0
+          ? `\nFilas omitidas por datos incompletos: ${editDebtorsSkipped}`
+          : "";
+
+      alert(`Se cargaron ${uploaded} deudores a la campaña.${skippedSummary}${metadataSummary}`);
+
+      setEditDebtorsPending([]);
+      setEditDebtorsSkipped(0);
+      setEditDebtorsMetadataLabels([]);
+      setEditDebtorsFileName("");
+      if (editDebtorsFileInputRef.current) {
+        editDebtorsFileInputRef.current.value = "";
+      }
+    } catch (error) {
+      console.error("Failed to upload campaign debtors:", error);
+      alert("Error al cargar deudores a la campaña");
+    } finally {
+      setEditDebtorsUploading(false);
     }
   };
 
@@ -1601,6 +2226,15 @@ export default function Campaigns() {
                           <Play className="h-4 w-4" />
                         </Button>
                       )}
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        title="Editar"
+                        onClick={() => handleOpenEditCampaign(campaign)}
+                        data-testid={`button-edit-${campaign.id}`}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
                       <Button 
                         variant="outline" 
                         size="icon" 
@@ -1801,16 +2435,16 @@ export default function Campaigns() {
                         </TableHeader>
                         <TableBody>
                           {campaignMessageList.map((message) => {
-                            const debtor = message.debtorId ? debtorById.get(message.debtorId) : undefined;
+                            const resolved = resolveDebtorDisplayFromMessage(message);
                             const timestamp = message.sentAt ?? message.createdAt;
                             return (
                               <TableRow key={message.id}>
                                 <TableCell className="text-xs text-muted-foreground">
                                   {timestamp ? new Date(timestamp).toLocaleString() : "-"}
                                 </TableCell>
-                                <TableCell className="font-medium">{debtor?.name ?? "-"}</TableCell>
+                                <TableCell className="font-medium">{resolved.displayName}</TableCell>
                                 <TableCell className="font-mono text-xs">
-                                  {message.phone ?? debtor?.phone ?? "-"}
+                                  {resolved.displayPhone}
                                 </TableCell>
                                 <TableCell>{renderMessageStatus(message.status)}</TableCell>
                                 <TableCell className="text-xs">{message.channel ?? "whatsapp"}</TableCell>
@@ -1829,10 +2463,312 @@ export default function Campaigns() {
                   </div>
                 )}
 
-                <DialogFooter>
+                <DialogFooter className="flex justify-between sm:justify-between">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      if (!detailsCampaign) return;
+                      setIsDetailsOpen(false);
+                      handleOpenEditCampaign(detailsCampaign);
+                    }}
+                    disabled={!detailsCampaign}
+                  >
+                    Editar
+                  </Button>
                   <Button variant="ghost" onClick={() => setIsDetailsOpen(false)}>
                     Cerrar
                   </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            <Dialog
+              open={isEditCampaignOpen}
+              onOpenChange={(open) => {
+                setIsEditCampaignOpen(open);
+                if (!open) {
+                  resetEditCampaignState();
+                }
+              }}
+            >
+              <DialogContent className="sm:max-w-[720px] max-h-[85vh] overflow-hidden flex flex-col">
+                <DialogHeader>
+                  <DialogTitle>Editar campaña</DialogTitle>
+                  <DialogDescription>
+                    {editingCampaign?.name ?? "Selecciona una campaña para editar"}
+                  </DialogDescription>
+                </DialogHeader>
+
+                {!editingCampaign ? (
+                  <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+                    <Pencil className="h-10 w-10 mb-3 opacity-50" />
+                    <p>No hay campaña seleccionada.</p>
+                  </div>
+                ) : (
+                  <div className="flex-1 overflow-y-auto pr-1">
+                    <Tabs
+                      value={editTab}
+                      onValueChange={(value) => setEditTab(value as "config" | "debtors")}
+                      className="w-full"
+                    >
+                      <TabsList className="grid w-full grid-cols-2">
+                        <TabsTrigger value="config">Configuración</TabsTrigger>
+                        <TabsTrigger value="debtors">Deudores</TabsTrigger>
+                      </TabsList>
+
+                      <TabsContent value="config" className="mt-4 space-y-4">
+                        <div className="space-y-2">
+                          <Label>Nombre de campaña</Label>
+                          <Input
+                            value={editCampaignName}
+                            onChange={(e) => setEditCampaignName(e.target.value)}
+                          />
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Canal</Label>
+                          <Select
+                            value={editCampaignChannel}
+                            onValueChange={(value) =>
+                              setEditCampaignChannel(
+                                value as "whatsapp" | "sms" | "whatsapp_fallback_sms"
+                              )
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Selecciona un canal" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="whatsapp">WhatsApp</SelectItem>
+                              <SelectItem value="sms">SMS (GSM)</SelectItem>
+                              <SelectItem value="whatsapp_fallback_sms">
+                                WhatsApp con fallback SMS
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        {editRequiresWhatsappPool && (
+                          <div className="space-y-2">
+                            <Label>Pool de WhatsApp</Label>
+                            <Select value={editSelectedPoolId} onValueChange={setEditSelectedPoolId}>
+                              <SelectTrigger>
+                                <SelectValue placeholder="Selecciona un pool de WhatsApp" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {pools?.map((pool) => (
+                                  <SelectItem key={pool.id} value={pool.id}>
+                                    {pool.name} ({displayPoolStrategy(pool.strategy)})
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            {!pools?.length && (
+                              <p className="text-xs text-muted-foreground">
+                                No hay pools creados todavía.
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        {editRequiresSmsPool && (
+                          <div className="space-y-2">
+                            <Label>Pool SMS</Label>
+                            <Select value={editSelectedSmsPoolId} onValueChange={setEditSelectedSmsPoolId}>
+                              <SelectTrigger>
+                                <SelectValue placeholder="Selecciona un pool SMS" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {gsmPools?.map((pool) => (
+                                  <SelectItem key={pool.id} value={pool.id}>
+                                    {pool.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            {!gsmPools?.length && (
+                              <p className="text-xs text-muted-foreground">
+                                No hay pools SMS creados todavía.
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="space-y-2">
+                          <Label>Rango de deudores (opcional)</Label>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-1">
+                              <Label className="text-xs text-muted-foreground">Desde</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                placeholder="(vacío)"
+                                value={editDebtorRangeStart}
+                                onChange={(e) => setEditDebtorRangeStart(e.target.value)}
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <Label className="text-xs text-muted-foreground">Hasta</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                placeholder="(vacío)"
+                                value={editDebtorRangeEnd}
+                                onChange={(e) => setEditDebtorRangeEnd(e.target.value)}
+                              />
+                            </div>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            Si cargas deudores directamente a esta campaña, el rango solo aplica sobre esos deudores.
+                          </p>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Plantilla de mensaje</Label>
+                          <Textarea
+                            value={editMessageTemplate}
+                            onChange={(e) => setEditMessageTemplate(e.target.value)}
+                            rows={4}
+                          />
+                        </div>
+
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>Variantes</Label>
+                            <Input
+                              type="number"
+                              min={0}
+                              max={20}
+                              value={editMessageVariantsCount}
+                              onChange={(e) => handleEditVariantCountChange(e.target.value)}
+                            />
+                            <p className="text-xs text-muted-foreground">
+                              Si agregas variantes, se usará una estrategia de rotación.
+                            </p>
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Estrategia de rotación</Label>
+                            <Select
+                              value={editMessageRotationStrategy}
+                              onValueChange={(value) =>
+                                setEditMessageRotationStrategy(
+                                  value as "none" | "random" | "round_robin"
+                                )
+                              }
+                            >
+                              <SelectTrigger>
+                                <SelectValue placeholder="Selecciona estrategia" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="none">Ninguna</SelectItem>
+                                <SelectItem value="random">Aleatoria</SelectItem>
+                                <SelectItem value="round_robin">Turnos fijos</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+
+                        {editMessageVariantsCount > 0 && (
+                          <div className="space-y-3">
+                            {Array.from({ length: editMessageVariantsCount }).map((_, index) => (
+                              <div key={index} className="space-y-1">
+                                <Label className="text-xs text-muted-foreground">
+                                  Variante {index + 1}
+                                </Label>
+                                <Textarea
+                                  value={editMessageVariantTemplates[index] ?? ""}
+                                  onChange={(e) =>
+                                    handleEditVariantTemplateChange(index, e.target.value)
+                                  }
+                                  rows={3}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </TabsContent>
+
+                      <TabsContent value="debtors" className="mt-4 space-y-4">
+                        <Card>
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-sm">Cargar deudores a esta campaña</CardTitle>
+                            <CardDescription>
+                              Importa un archivo `.csv`, `.txt`, `.xlsx` o `.xls` para asignar deudores directamente a esta campaña.
+                            </CardDescription>
+                          </CardHeader>
+                          <CardContent className="space-y-3">
+                            <Input
+                              ref={editDebtorsFileInputRef}
+                              type="file"
+                              accept=".csv,.txt,.xlsx,.xls"
+                              onChange={handleEditDebtorsFileUpload}
+                              disabled={editDebtorsUploading}
+                            />
+                            {editDebtorsFileName && (
+                              <div className="text-xs text-muted-foreground">
+                                Archivo: <span className="font-mono">{editDebtorsFileName}</span>
+                              </div>
+                            )}
+                            <div className="text-sm">
+                              Listos para cargar:{" "}
+                              <span className="font-semibold">{editDebtorsPending.length}</span>
+                              {editDebtorsSkipped > 0 && (
+                                <span className="text-xs text-muted-foreground">
+                                  {" "}
+                                  (omitidas {editDebtorsSkipped})
+                                </span>
+                              )}
+                            </div>
+                            {editDebtorsMetadataLabels.length > 0 && (
+                              <div className="text-xs text-muted-foreground">
+                                Metadata detectada: {editDebtorsMetadataLabels.slice(0, 8).join(", ")}
+                                {editDebtorsMetadataLabels.length > 8 ? "..." : ""}
+                              </div>
+                            )}
+                          </CardContent>
+                        </Card>
+                      </TabsContent>
+                    </Tabs>
+                  </div>
+                )}
+
+                <DialogFooter className="flex justify-between sm:justify-between">
+                  <Button
+                    variant="ghost"
+                    onClick={() => setIsEditCampaignOpen(false)}
+                    disabled={updateCampaign.isPending || editDebtorsUploading}
+                  >
+                    Cerrar
+                  </Button>
+                  {editTab === "config" ? (
+                    <Button
+                      onClick={handleSaveEditedCampaign}
+                      disabled={!editingCampaign || updateCampaign.isPending}
+                    >
+                      {updateCampaign.isPending ? (
+                        <span className="flex items-center gap-2">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Guardando...
+                        </span>
+                      ) : (
+                        "Guardar cambios"
+                      )}
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={handleUploadEditDebtors}
+                      disabled={!editingCampaign || editDebtorsUploading || editDebtorsPending.length === 0}
+                    >
+                      {editDebtorsUploading ? (
+                        <span className="flex items-center gap-2">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Cargando...
+                        </span>
+                      ) : (
+                        "Cargar deudores"
+                      )}
+                    </Button>
+                  )}
                 </DialogFooter>
               </DialogContent>
             </Dialog>
