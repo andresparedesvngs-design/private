@@ -54,6 +54,11 @@
 - `ADMIN_USERNAME`, `ADMIN_PASSWORD` — credenciales admin (defaults `admin/admin123`). (`server/auth.ts`)
 - `SESSION_SECRET` — secreto de sesiones (default `dev-session-secret-change-me`). (`server/auth.ts`)
 - `SESSION_COOKIE_SECURE` — override de cookie `secure` (`true|false`); por defecto sigue `NODE_ENV` (`server/auth.ts`).
+- `SESSION_STORE` — store de sesión (`memory` o `mongo`). Default: `mongo` en producción y `memory` en dev (`server/auth.ts`).
+- `ALLOW_LEGACY_ADMIN_LOGIN` — permite login por env `ADMIN_*` si no existe el usuario en DB. Default: `true` en dev y `false` en producción (`server/auth.ts`).
+- `ALLOW_DEFAULT_ADMIN_CREDENTIALS` — permite bootstrap con `admin/admin123` en producción (no recomendado). (`server/auth.ts`)
+- `ALLOW_INSECURE_SESSION_SECRET` — permite `SESSION_SECRET` default en producción (no recomendado). (`server/auth.ts`)
+- `ALLOW_INSECURE_DEFAULTS` — permite defaults inseguros en general en producción (no recomendado). (`server/auth.ts`)
 
 ### Logging HTTP (request/response)
 - `LOG_HTTP`, `LOG_HTTP_BODY`, `LOG_HTTP_HEADERS`, `LOG_HTTP_ALL` (`server/index.ts`).

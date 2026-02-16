@@ -1,6 +1,8 @@
 import type { Express, RequestHandler } from "express";
 import session from "express-session";
 import createMemoryStore from "memorystore";
+import mongoose from "mongoose";
+import MongoStore from "connect-mongo";
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import type { Server as SocketServer } from "socket.io";
@@ -23,37 +25,74 @@ export interface AuthUser {
 
 const SESSION_COOKIE_NAME = "wm.sid";
 const ONE_WEEK_MS = 1000 * 60 * 60 * 24 * 7;
+const DEFAULT_ADMIN_USERNAME = "admin";
+const DEFAULT_ADMIN_PASSWORD = "admin123";
+const DEFAULT_SESSION_SECRET = "dev-session-secret-change-me";
 
-function getAdminCredentials() {
-  const username = process.env.ADMIN_USERNAME || "admin";
-  const password = process.env.ADMIN_PASSWORD || "admin123";
+const isTruthyEnv = (value: string | undefined) => {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return ["true", "1", "yes", "on"].includes(normalized);
+};
 
-  if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) {
-    console.warn(
-      "[auth] Using default admin credentials. Set ADMIN_USERNAME and ADMIN_PASSWORD in .env."
-    );
+function getAdminCredentials(options?: {
+  allowDefaults?: boolean;
+}): { username: string; password: string } | null {
+  const allowDefaults = options?.allowDefaults ?? true;
+  const envUsername = (process.env.ADMIN_USERNAME ?? "").trim();
+  const envPassword = (process.env.ADMIN_PASSWORD ?? "").trim();
+
+  if (envUsername && envPassword) {
+    return { username: envUsername, password: envPassword };
   }
 
-  return { username, password };
+  if (!allowDefaults) {
+    return null;
+  }
+
+  console.warn(
+    "[auth] Using default admin credentials. Set ADMIN_USERNAME and ADMIN_PASSWORD in .env."
+  );
+  return { username: DEFAULT_ADMIN_USERNAME, password: DEFAULT_ADMIN_PASSWORD };
 }
 
 function getSessionSecret() {
-  const secret = process.env.SESSION_SECRET || "dev-session-secret-change-me";
+  const secret = (process.env.SESSION_SECRET ?? "").trim() || DEFAULT_SESSION_SECRET;
   if (!process.env.SESSION_SECRET) {
-    console.warn(
-      "[auth] Using default SESSION_SECRET. Set SESSION_SECRET in .env for production."
-    );
+    console.warn("[auth] Using default SESSION_SECRET. Set SESSION_SECRET in .env.");
   }
   return secret;
 }
 
 export async function createAdminIfMissing(): Promise<void> {
+  const isProduction = process.env.NODE_ENV === "production";
   const adminCount = await storage.getActiveAdminCount();
   if (adminCount > 0) {
     return;
   }
 
-  const { username: rawUsername, password } = getAdminCredentials();
+  const allowDefaults = !isProduction || isTruthyEnv(process.env.ALLOW_INSECURE_DEFAULTS);
+  const creds = getAdminCredentials({ allowDefaults });
+  if (!creds) {
+    throw new Error(
+      "[auth] No active admin users and ADMIN_USERNAME/ADMIN_PASSWORD not set. Refusing to start."
+    );
+  }
+
+  const isDefaultCombo =
+    creds.username.trim().toLowerCase() === DEFAULT_ADMIN_USERNAME &&
+    creds.password === DEFAULT_ADMIN_PASSWORD;
+  if (
+    isProduction &&
+    isDefaultCombo &&
+    !isTruthyEnv(process.env.ALLOW_DEFAULT_ADMIN_CREDENTIALS)
+  ) {
+    throw new Error(
+      "[auth] Refusing to bootstrap with default admin credentials in production. Set ADMIN_USERNAME/ADMIN_PASSWORD or ALLOW_DEFAULT_ADMIN_CREDENTIALS=true."
+    );
+  }
+
+  const { username: rawUsername, password } = creds;
   const username = rawUsername.trim().toLowerCase();
 
   if (!username || !password) {
@@ -131,6 +170,8 @@ export function setupAuth(app: Express): {
   ensureAuthenticated: RequestHandler;
 } {
   const isProduction = process.env.NODE_ENV === "production";
+  const allowInsecureDefaults =
+    !isProduction || isTruthyEnv(process.env.ALLOW_INSECURE_DEFAULTS);
   const sessionCookieSecureRaw = (
     process.env.SESSION_COOKIE_SECURE ?? ""
   )
@@ -143,13 +184,80 @@ export function setupAuth(app: Express): {
         ? false
         : isProduction;
   const sessionSecret = getSessionSecret();
-  const { username: adminUsername, password: adminPassword } =
-    getAdminCredentials();
+  if (
+    isProduction &&
+    sessionSecret === DEFAULT_SESSION_SECRET &&
+    !isTruthyEnv(process.env.ALLOW_INSECURE_SESSION_SECRET)
+  ) {
+    throw new Error(
+      "[auth] SESSION_SECRET is not set (or is default) in production. Refusing to start. Set SESSION_SECRET or ALLOW_INSECURE_SESSION_SECRET=true."
+    );
+  }
+
+  const adminCredsForLegacy = getAdminCredentials({
+    allowDefaults: allowInsecureDefaults,
+  });
+  const adminUsername = adminCredsForLegacy?.username ?? "";
+  const adminPassword = adminCredsForLegacy?.password ?? "";
+  const allowLegacyLogin = isProduction
+    ? isTruthyEnv(process.env.ALLOW_LEGACY_ADMIN_LOGIN)
+    : true;
 
   const MemoryStore = createMemoryStore(session);
-  const store = new MemoryStore({
+  const memoryStore = new MemoryStore({
     checkPeriod: 1000 * 60 * 60 * 24,
   });
+
+  const sessionStoreMode = (
+    process.env.SESSION_STORE ?? (isProduction ? "mongo" : "memory")
+  )
+    .trim()
+    .toLowerCase();
+
+  const resolveMongoSessionStore = () => {
+    const mongoUrl = (process.env.MONGODB_URI ?? "").trim();
+    if (!mongoUrl && mongoose.connection.readyState !== 1) {
+      if (isProduction) {
+        throw new Error(
+          "[auth] SESSION_STORE=mongo requires MONGODB_URI (or an active mongoose connection)."
+        );
+      }
+      return null;
+    }
+
+    const ttlSeconds = Math.ceil(ONE_WEEK_MS / 1000);
+    try {
+      if (mongoose.connection.readyState === 1) {
+        return MongoStore.create({
+          client: mongoose.connection.getClient(),
+          collectionName: "sessions",
+          ttl: ttlSeconds,
+          autoRemove: "native",
+        });
+      }
+
+      return MongoStore.create({
+        mongoUrl,
+        collectionName: "sessions",
+        ttl: ttlSeconds,
+        autoRemove: "native",
+      });
+    } catch (error: any) {
+      if (isProduction) {
+        throw error;
+      }
+      console.warn(
+        "[auth] Failed to init Mongo session store, falling back to memory:",
+        error?.message ?? error
+      );
+      return null;
+    }
+  };
+
+  const store =
+    sessionStoreMode === "mongo"
+      ? resolveMongoSessionStore() ?? memoryStore
+      : memoryStore;
 
   const sessionMiddleware = session({
     name: SESSION_COOKIE_NAME,
@@ -179,7 +287,7 @@ export function setupAuth(app: Express): {
 
   const legacyAdminUser: AuthUser = {
     id: "legacy-admin",
-    username: adminUsername,
+    username: adminUsername || DEFAULT_ADMIN_USERNAME,
     role: "admin",
     displayName: "Administrador",
     executivePhone: null,
@@ -205,7 +313,13 @@ export function setupAuth(app: Express): {
           return done(null, buildAuthUser(user));
         }
 
-        if (username === adminUsername && password === adminPassword) {
+        if (
+          allowLegacyLogin &&
+          adminUsername &&
+          adminPassword &&
+          username === adminUsername &&
+          password === adminPassword
+        ) {
           console.warn("[auth] Using legacy ADMIN_USERNAME/ADMIN_PASSWORD login.");
           return done(null, legacyAdminUser);
         }
@@ -259,7 +373,7 @@ export function setupAuth(app: Express): {
 
     return res.json({
       id: user?.id ?? legacyAdminUser.id,
-      username: user?.username ?? adminUsername,
+      username: user?.username ?? (adminUsername || DEFAULT_ADMIN_USERNAME),
       role: user?.role ?? "admin",
       displayName: user?.displayName ?? null,
       executivePhone: user?.executivePhone ?? null,

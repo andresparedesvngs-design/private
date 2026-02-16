@@ -632,26 +632,21 @@ export async function registerRoutes(
 
   app.patch("/api/sessions/:id", async (req, res) => {
     try {
-      const user = ensureRole(req, res, ["admin", "supervisor"]);
+      const user = ensureRole(req, res, ["admin"]);
       if (!user) return;
-      const payload = insertSessionSchema.partial().parse(req.body ?? {});
-      if (payload.purpose && !["default", "notify"].includes(payload.purpose)) {
-        return res.status(400).json({ error: "Invalid session purpose" });
-      }
-      if (payload.purpose === "notify" && !isAdmin(user)) {
-        return res.status(403).json({ error: "No autorizado" });
-      }
-
-      const wantsProxyChange = payload.proxyServerId !== undefined;
-      const wantsProxyLockChange = payload.proxyLocked !== undefined;
-      if ((wantsProxyChange || wantsProxyLockChange) && !isAdmin(user)) {
-        return res.status(403).json({ error: "No autorizado" });
-      }
+      const schema = z.object({
+        purpose: z.enum(["default", "notify"]).optional(),
+        proxyServerId: z.string().optional().nullable(),
+        proxyLocked: z.boolean().optional(),
+      });
+      const payload = schema.parse(req.body ?? {});
 
       const existing = await storage.getSession(req.params.id);
       if (!existing) {
         return res.status(404).json({ error: "Session not found" });
       }
+
+      const wantsProxyChange = payload.proxyServerId !== undefined;
 
       if (wantsProxyChange) {
         const targetProxyId = payload.proxyServerId ?? null;
