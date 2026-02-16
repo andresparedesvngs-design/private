@@ -45,12 +45,15 @@
 ### Core / Server
 - `MONGODB_URI` — URI MongoDB. Default: `mongodb://localhost:27017/whatsapp_campaigns` (`server/db.ts`).
 - `PORT` — puerto del servidor. Default: `5000` (`server/index.ts`).
+- `HOST` — host bind del servidor. Default: `localhost` en dev y `0.0.0.0` en producción (`server/index.ts`).
 - `NODE_ENV` — afecta cookie `secure` y modo prod/dev (`server/index.ts`, `server/auth.ts`).
 - `CORS_ORIGIN` — origen permitido para Socket.IO. Default: `http://localhost:5000` (`server/routes.ts`).
+- `TRUST_PROXY` — configura `app.set("trust proxy", ...)` (útil detrás de reverse proxy) (`server/index.ts`).
 
 ### Auth
 - `ADMIN_USERNAME`, `ADMIN_PASSWORD` — credenciales admin (defaults `admin/admin123`). (`server/auth.ts`)
 - `SESSION_SECRET` — secreto de sesiones (default `dev-session-secret-change-me`). (`server/auth.ts`)
+- `SESSION_COOKIE_SECURE` — override de cookie `secure` (`true|false`); por defecto sigue `NODE_ENV` (`server/auth.ts`).
 
 ### Logging HTTP (request/response)
 - `LOG_HTTP`, `LOG_HTTP_BODY`, `LOG_HTTP_HEADERS`, `LOG_HTTP_ALL` (`server/index.ts`).
@@ -66,6 +69,13 @@
 - `WHATSAPP_VERIFY_WINDOW_MS` — ventana máxima (ms) para considerar una sesión como verificada (default 30000).
 - `WHATSAPP_USER_AGENT` / `PUPPETEER_USER_AGENT` — user agent opcional (`server/whatsappManager.ts`).
 - `PUPPETEER_EXECUTABLE_PATH` / `CHROME_PATH` — ruta explícita a Chrome/Chromium (`server/whatsappManager.ts`).
+- `WHATSAPP_DESTROY_TIMEOUT_MS` — timeout para `client.destroy()` (`server/whatsappManager.ts`).
+- `WHATSAPP_RESET_AUTH_DESTROY_TIMEOUT_MS` — timeout de `destroySession()` dentro de reset-auth (`server/whatsappManager.ts`).
+- `WHATSAPP_RESET_AUTH_CREATE_TIMEOUT_MS` — timeout de `createSession()` dentro de reset-auth (`server/whatsappManager.ts`).
+- `WHATSAPP_RECONNECT_DESTROY_TIMEOUT_MS` — timeout al destruir sesión durante reconnect (`server/routes.ts`).
+- `WHATSAPP_RECONNECT_CREATE_TIMEOUT_MS` — timeout al crear sesión durante reconnect (`server/routes.ts`).
+- `WHATSAPP_RESET_AUTH_ROUTE_TIMEOUT_MS` — timeout del endpoint reset-auth (`server/routes.ts`).
+- `WHATSAPP_QR_ROUTE_TIMEOUT_MS` — timeout del endpoint que abre ventana QR (`server/routes.ts`).
 
 ### Proxy Servers (SOCKS5)
 - `PROXY_ALLOWED_SUBNETS` — subredes permitidas para hosts (default `172.16.55.0/24`).
@@ -86,6 +96,7 @@
 - `CAMPAIGN_IMMEDIATE_PAUSE_NO_SESSIONS`, `CAMPAIGN_POOL_AUTO_ADJUST`,
   `CAMPAIGN_POOL_FALLBACK_ANY_SESSION`, `CAMPAIGN_MIN_POOL_SESSIONS`,
   `CAMPAIGN_WAIT_FOR_SESSIONS_MS` (`server/campaignEngine.ts`).
+- `CAMPAIGN_DISCONNECT_PAUSE_MINUTES` — pausa (min) cuando una sesión se desconecta y una campaña queda en cooldown (`server/campaignEngine.ts`).
 - `WHATSAPP_AUTO_THROTTLE_ENABLED`, `WHATSAPP_AUTO_THROTTLE_TARGET_SESSIONS`,
   `WHATSAPP_AUTO_THROTTLE_MAX_MULTIPLIER` (`server/campaignEngine.ts`).
 

@@ -23,11 +23,15 @@
 - `server/storage.ts` — implementación de `MongoStorage` + helpers de negocio.
 - `server/campaignEngine.ts` — motor de campañas (envíos, pausas, fallback, progreso).
 - `server/whatsappManager.ts` — gestión de sesiones WhatsApp Web, QR, polling, mensajes entrantes.
+- `server/healthPolicy.ts` — política de salud de sesiones (strikes/cooldown/blocked) + normalización de límites/counters.
+- `server/rateLimiter.ts` — rate limiter in-memory por sesión (token bucket) para límite por minuto.
 - `server/smsManager.ts` — envío SMS (Infobip, SMS Gate, HTTP genérico) + normalización.
 - `server/logging.ts` — logger a archivos con niveles y formato.
 - `server/vite.ts` — middleware Vite para dev.
 - `server/static.ts` — servir estáticos en prod.
 - `server/smsManager.test.ts` — test unitario de normalización de números (Vitest).
+- `server/healthPolicy.test.ts` — tests unitarios para health policy (Vitest).
+- `server/rateLimiter.test.ts` — tests unitarios para token bucket limiter (Vitest).
 
 ## Shared (`shared/`)
 

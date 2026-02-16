@@ -45,6 +45,35 @@ const isBusyError = (error: unknown) => {
   return apiError?.response?.data?.error === "busy";
 };
 
+const getSessionGuardError = (
+  error: unknown
+): { type: "cooldown" | "blocked"; cooldownUntil?: string | null } | null => {
+  const apiError = error as any;
+  const code = apiError?.response?.data?.error;
+  if (code === "blocked") {
+    return { type: "blocked" };
+  }
+  if (code === "cooldown") {
+    return {
+      type: "cooldown",
+      cooldownUntil: apiError?.response?.data?.cooldownUntil ?? null,
+    };
+  }
+  return null;
+};
+
+const getSessionGuardMessage = (error: unknown): string | null => {
+  const guard = getSessionGuardError(error);
+  if (!guard) return null;
+  if (guard.type === "blocked") {
+    return "Sesión bloqueada por riesgos repetidos. Requiere intervención manual.";
+  }
+  if (!guard.cooldownUntil) {
+    return "Sesión en cooldown temporal. Intenta más tarde.";
+  }
+  return `Sesión en cooldown hasta ${new Date(guard.cooldownUntil).toLocaleString()}.`;
+};
+
 export default function Sessions() {
   const { data: user } = useAuthMe();
   const canManageSessions = user?.role === "admin" || user?.role === "supervisor";
@@ -125,6 +154,34 @@ export default function Sessions() {
       await sleep(QR_POLL_INTERVAL_MS);
     }
     return false;
+  };
+
+  const handleRecomputeLimits = async (sessionId: string) => {
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/limits/recompute`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const message =
+          payload?.message || payload?.error || "No se pudo recalcular límites";
+        const error = new Error(message);
+        (error as any).response = { data: payload };
+        throw error;
+      }
+      toast({
+        title: "Límites recalculados",
+        description: "Se recomputó salud y límites de envío de la sesión.",
+      });
+    } catch (error) {
+      toast({
+        title: "No se pudo recalcular",
+        description: getErrorMessage(error, "Error recalculando límites."),
+        variant: "destructive",
+      });
+    }
   };
 
   const handleCreateSession = async () => {
@@ -221,9 +278,11 @@ export default function Sessions() {
       }
     } catch (error) {
       console.error("Failed to reconnect session:", error);
-      const description = isBusyError(error)
-        ? "La sesión está en progreso. Espera y vuelve a intentar."
-        : getErrorMessage(error, "Error al reconectar sesión.");
+      const description =
+        getSessionGuardMessage(error) ??
+        (isBusyError(error)
+          ? "La sesión está en progreso. Espera y vuelve a intentar."
+          : getErrorMessage(error, "Error al reconectar sesión."));
       toast({
         title: "No se pudo reconectar",
         description,
@@ -277,9 +336,11 @@ export default function Sessions() {
       }
     } catch (error) {
       console.error("Failed to reset auth:", error);
-      const description = isBusyError(error)
-        ? "La sesión está ocupada con otra operación."
-        : getErrorMessage(error, "Error al reiniciar auth.");
+      const description =
+        getSessionGuardMessage(error) ??
+        (isBusyError(error)
+          ? "La sesión está ocupada con otra operación."
+          : getErrorMessage(error, "Error al reiniciar auth."));
       toast({
         title: "No se pudo reiniciar auth",
         description,
@@ -370,9 +431,11 @@ export default function Sessions() {
       .catch((error) => {
         toast({
           title: "No se pudo abrir QR",
-          description: isBusyError(error)
-            ? "La sesión está ocupada con otra operación."
-            : getErrorMessage(error, "Error abriendo QR."),
+          description:
+            getSessionGuardMessage(error) ??
+            (isBusyError(error)
+              ? "La sesión está ocupada con otra operación."
+              : getErrorMessage(error, "Error abriendo QR.")),
           variant: "destructive",
         });
       });
@@ -469,6 +532,16 @@ export default function Sessions() {
     reconnecting: "Reconectando",
   };
   const displayStatus = (status: string) => sessionStatusLabels[status] ?? status;
+  const sessionHealthLabels: Record<string, string> = {
+    unknown: "Sin datos",
+    healthy: "Saludable",
+    warning: "Advertencia",
+    risky: "Riesgo",
+    cooldown: "Cooldown",
+    blocked: "Bloqueada",
+  };
+  const displayHealth = (status?: string | null) =>
+    sessionHealthLabels[String(status ?? "unknown")] ?? String(status ?? "unknown");
 
   const modalStatusText = (() => {
     if (!pendingSession) return "Esperando estado de la sesion...";
@@ -743,6 +816,23 @@ export default function Sessions() {
                     const proxyStatus = proxy?.status ?? "offline";
                     const proxyLabel = proxy ? proxy.name : "Sin proxy";
                     const proxyIp = proxy?.lastPublicIp ?? null;
+                    const health = session.healthStatus ?? "unknown";
+                    const healthBadgeClass =
+                      health === "healthy"
+                        ? "text-green-700 border-green-200 bg-green-50"
+                        : health === "warning"
+                          ? "text-amber-700 border-amber-200 bg-amber-50"
+                          : health === "risky"
+                            ? "text-orange-700 border-orange-200 bg-orange-50"
+                            : health === "cooldown"
+                              ? "text-blue-700 border-blue-200 bg-blue-50"
+                              : health === "blocked"
+                                ? "text-red-700 border-red-200 bg-red-50"
+                                : "text-gray-700 border-gray-200 bg-gray-50";
+                    const cooldownHint =
+                      session.cooldownUntil && new Date(session.cooldownUntil).getTime() > Date.now()
+                        ? new Date(session.cooldownUntil).toLocaleString()
+                        : null;
                     return (
                       <div
                         key={session.id}
@@ -782,18 +872,28 @@ export default function Sessions() {
                           </div>
                         </div>
                         <div className="col-span-2">
-                          <Badge
-                            variant={session.status === "connected" ? "outline" : "secondary"}
-                            className={
-                              session.status === "connected"
-                                ? "text-green-600 border-green-200 bg-green-50"
-                                : session.status === "qr_ready"
-                                  ? "text-blue-600 border-blue-200 bg-blue-50"
-                                  : ""
-                            }
-                          >
-                            {displayStatus(session.status)}
-                          </Badge>
+                          <div className="flex flex-col gap-1">
+                            <Badge
+                              variant={session.status === "connected" ? "outline" : "secondary"}
+                              className={
+                                session.status === "connected"
+                                  ? "text-green-600 border-green-200 bg-green-50"
+                                  : session.status === "qr_ready"
+                                    ? "text-blue-600 border-blue-200 bg-blue-50"
+                                    : ""
+                              }
+                            >
+                              {displayStatus(session.status)}
+                            </Badge>
+                            <Badge variant="outline" className={healthBadgeClass}>
+                              {displayHealth(health)}
+                            </Badge>
+                            {cooldownHint && (
+                              <span className="text-[10px] text-blue-700">
+                                Hasta {cooldownHint}
+                              </span>
+                            )}
+                          </div>
                         </div>
                         <div className="col-span-2 font-semibold">
                           {session.messagesSent.toLocaleString()}
@@ -911,6 +1011,58 @@ export default function Sessions() {
                   <div>Reset auth: {detailsSession.resetAuthCount ?? 0}</div>
                   <div>Reconnects: {detailsSession.reconnectCount ?? 0}</div>
                   <div>Último disconnect: {formatDateTime(detailsSession.lastDisconnectAt)}</div>
+                </div>
+                <div className="pt-2 border-t">
+                  <div className="text-sm font-medium">Salud de sesión</div>
+                  <div className="grid grid-cols-2 gap-2 text-xs mt-1">
+                    <div>Estado: {displayHealth(detailsSession.healthStatus)}</div>
+                    <div>Score: {detailsSession.healthScore ?? 0}</div>
+                    <div>Strikes: {detailsSession.strikeCount ?? 0}</div>
+                    <div>Cooldown: {formatDateTime(detailsSession.cooldownUntil)}</div>
+                    <div className="col-span-2">
+                      Motivo: {detailsSession.healthReason ?? "-"}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t">
+                  <div className="text-sm font-medium">Límites de envío</div>
+                  <div className="grid grid-cols-2 gap-2 text-xs mt-1">
+                    <div>
+                      Tokens/min: {detailsSession.sendLimits?.tokensPerMinute ?? 6}
+                    </div>
+                    <div>Burst: {detailsSession.sendLimits?.bucketSize ?? 10}</div>
+                    <div>Máx hora: {detailsSession.sendLimits?.hourlyMax ?? 60}</div>
+                    <div>Máx día: {detailsSession.sendLimits?.dailyMax ?? 200}</div>
+                    <div>
+                      Contador hora: {detailsSession.countersWindow?.hourCount ?? 0}
+                    </div>
+                    <div>
+                      Desde: {formatDateTime(detailsSession.countersWindow?.hourStart ?? null)}
+                    </div>
+                    <div>
+                      Contador día: {detailsSession.countersWindow?.dayCount ?? 0}
+                    </div>
+                    <div>
+                      Desde: {formatDateTime(detailsSession.countersWindow?.dayStart ?? null)}
+                    </div>
+                    <div className="col-span-2">
+                      Último ajuste: {formatDateTime(detailsSession.lastLimitUpdateAt)}
+                    </div>
+                    <div className="col-span-2">
+                      Motivo ajuste: {detailsSession.limitChangeReason ?? "-"}
+                    </div>
+                  </div>
+                  <div className="mt-3 flex items-center justify-end gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleRecomputeLimits(detailsSession.id)}
+                      disabled={detailsSessionBusy}
+                    >
+                      Recalcular límites
+                    </Button>
+                  </div>
                 </div>
               </div>
 

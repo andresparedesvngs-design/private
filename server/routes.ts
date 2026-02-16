@@ -2,7 +2,7 @@ import type { Express, RequestHandler } from "express";
 import { createServer, type Server } from "http";
 import { Server as SocketServer } from "socket.io";
 import { storage } from "./storage";
-import { whatsappManager } from "./whatsappManager";
+import { whatsappManager, WhatsAppSendPolicyError } from "./whatsappManager";
 import { campaignEngine } from "./campaignEngine";
 import { proxyMonitor } from "./proxyMonitor";
 import { bindAuthToSocket, type AuthUser } from "./auth";
@@ -209,6 +209,35 @@ export async function registerRoutes(
 
   const isSessionBusy = (sessionId: string, status?: string | null) =>
     sessionBusyLocks.has(sessionId) || isSessionBusyStatus(status);
+
+  const resolveHealthGuard = (session: any) => {
+    if (!session) return null;
+
+    if (session.healthStatus === "blocked") {
+      return {
+        status: 409 as const,
+        body: { error: "blocked", sessionId: session.id },
+      };
+    }
+
+    const cooldownUntil = session.cooldownUntil
+      ? new Date(session.cooldownUntil)
+      : null;
+    if (cooldownUntil && !Number.isNaN(cooldownUntil.getTime())) {
+      if (Date.now() < cooldownUntil.getTime()) {
+        return {
+          status: 409 as const,
+          body: {
+            error: "cooldown",
+            cooldownUntil: cooldownUntil.toISOString(),
+            sessionId: session.id,
+          },
+        };
+      }
+    }
+
+    return null;
+  };
 
   const extractWaId = (value: any): string | null => {
     if (!value) return null;
@@ -467,6 +496,64 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/sessions/:id/limits", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const snapshot = await whatsappManager.getSessionLimits(req.params.id);
+      if (!snapshot) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      res.json(snapshot);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/sessions/:id/limits/recompute", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const sessionId = req.params.id;
+      await whatsappManager.recomputeSessionHealth(sessionId);
+      const snapshot = await whatsappManager.getSessionLimits(sessionId);
+      if (!snapshot) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      res.json(snapshot);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/sessions/:id/limits/set", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin"])) {
+        return;
+      }
+      const schema = z.object({
+        tokensPerMinute: z.number().int().nonnegative().optional(),
+        bucketSize: z.number().int().nonnegative().optional(),
+        dailyMax: z.number().int().nonnegative().optional(),
+        hourlyMax: z.number().int().nonnegative().optional(),
+      });
+      const patch = schema.parse(req.body ?? {});
+      const updated = await whatsappManager.setSessionLimits(req.params.id, patch);
+      if (!updated) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+      const snapshot = await whatsappManager.getSessionLimits(req.params.id);
+      res.json(snapshot ?? { sessionId: req.params.id, sendLimits: updated });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/sessions", async (req, res) => {
     try {
       const user = ensureRole(req, res, ["admin", "supervisor"]);
@@ -506,6 +593,28 @@ export async function registerRoutes(
         authFailureCount: 0,
         resetAuthCount: 0,
         reconnectCount: 0,
+        healthStatus: "unknown",
+        healthScore: 0,
+        healthReason: null,
+        healthUpdatedAt: null,
+        cooldownUntil: null,
+        strikeCount: 0,
+        lastStrikeAt: null,
+        lastStrikeReason: null,
+        sendLimits: {
+          tokensPerMinute: 6,
+          bucketSize: 10,
+          dailyMax: 200,
+          hourlyMax: 60,
+        },
+        countersWindow: {
+          dayCount: 0,
+          dayStart: null,
+          hourCount: 0,
+          hourStart: null,
+        },
+        lastLimitUpdateAt: null,
+        limitChangeReason: null,
       });
       
       await whatsappManager.createSession(session.id);
@@ -637,6 +746,10 @@ export async function registerRoutes(
       if (!session) {
         return res.status(404).json({ error: "Session not found" });
       }
+      const healthGuard = resolveHealthGuard(session);
+      if (healthGuard) {
+        return res.status(healthGuard.status).json(healthGuard.body);
+      }
 
       if (session.status === "auth_failed") {
         console.warn(
@@ -737,6 +850,10 @@ export async function registerRoutes(
       if (!session) {
         return res.status(404).json({ error: "Session not found" });
       }
+      const healthGuard = resolveHealthGuard(session);
+      if (healthGuard) {
+        return res.status(healthGuard.status).json(healthGuard.body);
+      }
 
       if (isSessionBusy(sessionId, session.status)) {
         console.warn(`[routes][sessions][${sessionId}] reset-auth blocked: busy`);
@@ -761,6 +878,10 @@ export async function registerRoutes(
         console.error(`[routes][sessions][${sessionId}] reset-auth failed:`, message);
 
         await storage.updateSession(sessionId, { status: nextStatus });
+        await whatsappManager.recomputeSessionHealth(sessionId, {
+          forceCooldown: true,
+          strikeReason: "reset_auth_failed_route",
+        });
         await storage.createSystemLog({
           level: "error",
           source: "whatsapp",
@@ -2634,13 +2755,19 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Session not found" });
       }
 
+      const healthGuard = resolveHealthGuard(session);
+      if (healthGuard) {
+        return res.status(healthGuard.status).json(healthGuard.body);
+      }
+
       if (session.status !== 'connected') {
         return res.status(400).json({ error: "Session is not connected" });
       }
 
+      const whatsappPhone = whatsappManager.normalizePhoneForWhatsapp(phone);
       const sendResult = await whatsappManager.sendMessage(req.params.id, phone, message);
       
-      const debtor = await storage.getDebtorByPhone(phone);
+      const debtor = await storage.getDebtorByPhone(whatsappPhone || phone);
 
       if (debtor?.id) {
         await storage.updateDebtor(debtor.id, {
@@ -2652,7 +2779,7 @@ export async function registerRoutes(
         sessionId: req.params.id,
         debtorId: debtor?.id,
         campaignId: debtor?.campaignId,
-        phone,
+        phone: whatsappPhone || phone,
         content: message,
         providerResponse: sendResult.messageId ?? null,
         status: 'sent',
@@ -2675,6 +2802,27 @@ export async function registerRoutes(
 
       res.json({ success: true, message: "Message sent successfully" });
     } catch (error: any) {
+      if (error instanceof WhatsAppSendPolicyError) {
+        if (error.code === "rate_limited") {
+          return res.status(429).json({
+            error: "rate_limited",
+            retryAfterMs: error.retryAfterMs ?? 0,
+            limitScope: error.limitScope ?? null,
+            sessionId: req.params.id,
+          });
+        }
+        if (error.code === "cooldown") {
+          return res.status(409).json({
+            error: "cooldown",
+            cooldownUntil: error.cooldownUntil ?? null,
+            sessionId: req.params.id,
+          });
+        }
+        if (error.code === "blocked") {
+          return res.status(409).json({ error: "blocked", sessionId: req.params.id });
+        }
+      }
+
       res.status(500).json({ error: error.message });
     }
   });
@@ -2710,6 +2858,41 @@ export async function registerRoutes(
       });
 
       res.json({ success: true, count });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/debtors/deduplicate", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+
+      const schema = z.object({
+        ownerUserId: z.string().optional().nullable(),
+      });
+      const { ownerUserId } = schema.parse(req.body ?? {});
+
+      const result = await storage.deduplicateDebtorsByPhone(ownerUserId);
+
+      await storage.createSystemLog({
+        level: "warning",
+        source: "system",
+        message: `Debtors deduplicated by phone: removed ${result.removed}`,
+        metadata: {
+          ...result,
+          ownerUserId: ownerUserId ?? null,
+        },
+      });
+
+      res.json({
+        success: true,
+        ...result,
+      });
     } catch (error: any) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: error.errors });

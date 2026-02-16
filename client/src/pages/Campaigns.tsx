@@ -912,7 +912,6 @@ export default function Campaigns() {
         messageVariants,
         messageRotationStrategy: rotationStrategy,
         status: 'draft',
-        totalDebtors: selectedDebtorsCount,
         sent: 0,
         failed: 0,
         progress: 0,
@@ -1680,14 +1679,23 @@ export default function Campaigns() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label>Público objetivo</Label>
+                      <Label>Público objetivo (opcional al crear)</Label>
                       <div className="p-3 bg-muted rounded-lg text-sm">
-                        <span className="font-medium">{selectedDebtorsCount}</span>{" "}
-                        deudores disponibles para envío
-                        {rangeActive && (
-                          <span className="text-xs text-muted-foreground">
-                            {" "}
-                            (de {totalAvailableDebtors})
+                        {totalAvailableDebtors > 0 ? (
+                          <>
+                            <span className="font-medium">{selectedDebtorsCount}</span>{" "}
+                            deudores disponibles para envío
+                            {rangeActive && (
+                              <span className="text-xs text-muted-foreground">
+                                {" "}
+                                (de {totalAvailableDebtors})
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <span>
+                            No hay deudores disponibles ahora. Puedes crear la campaña y cargarlos
+                            después desde Editar campaña.
                           </span>
                         )}
                       </div>
@@ -1714,7 +1722,8 @@ export default function Campaigns() {
                         </div>
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        Rango opcional. Orden: deudores más recientes primero.
+                        Rango opcional. También puedes crear la campaña sin deudores y cargarlos
+                        luego desde la edición.
                       </p>
                       {rangeInvalid && (
                         <p className="text-xs text-destructive">

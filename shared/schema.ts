@@ -22,6 +22,44 @@ export const insertSessionSchema = z.object({
   lastResetAuthAt: z.date().optional().nullable(),
   reconnectCount: z.number().default(0),
   lastReconnectAt: z.date().optional().nullable(),
+  healthStatus: z
+    .enum(["unknown", "healthy", "warning", "risky", "cooldown", "blocked"])
+    .default("unknown"),
+  healthScore: z.number().default(0),
+  healthReason: z.string().optional().nullable(),
+  healthUpdatedAt: z.date().optional().nullable(),
+  cooldownUntil: z.date().optional().nullable(),
+  strikeCount: z.number().default(0),
+  lastStrikeAt: z.date().optional().nullable(),
+  lastStrikeReason: z.string().optional().nullable(),
+  sendLimits: z
+    .object({
+      tokensPerMinute: z.number().int().nonnegative().default(6),
+      bucketSize: z.number().int().nonnegative().default(10),
+      dailyMax: z.number().int().nonnegative().default(200),
+      hourlyMax: z.number().int().nonnegative().default(60),
+    })
+    .default({
+      tokensPerMinute: 6,
+      bucketSize: 10,
+      dailyMax: 200,
+      hourlyMax: 60,
+    }),
+  countersWindow: z
+    .object({
+      dayCount: z.number().int().nonnegative().default(0),
+      dayStart: z.date().optional().nullable(),
+      hourCount: z.number().int().nonnegative().default(0),
+      hourStart: z.date().optional().nullable(),
+    })
+    .default({
+      dayCount: 0,
+      dayStart: null,
+      hourCount: 0,
+      hourStart: null,
+    }),
+  lastLimitUpdateAt: z.date().optional().nullable(),
+  limitChangeReason: z.string().optional().nullable(),
 });
 
 export const insertProxyServerSchema = z.object({
@@ -208,6 +246,33 @@ const sessionSchema = new mongoose.Schema({
   lastResetAuthAt: { type: Date, default: null },
   reconnectCount: { type: Number, default: 0 },
   lastReconnectAt: { type: Date, default: null },
+  healthStatus: {
+    type: String,
+    enum: ["unknown", "healthy", "warning", "risky", "cooldown", "blocked"],
+    default: "unknown",
+    index: true,
+  },
+  healthScore: { type: Number, default: 0 },
+  healthReason: { type: String, default: null },
+  healthUpdatedAt: { type: Date, default: null },
+  cooldownUntil: { type: Date, default: null, index: true },
+  strikeCount: { type: Number, default: 0 },
+  lastStrikeAt: { type: Date, default: null },
+  lastStrikeReason: { type: String, default: null },
+  sendLimits: {
+    tokensPerMinute: { type: Number, default: 6 },
+    bucketSize: { type: Number, default: 10 },
+    dailyMax: { type: Number, default: 200 },
+    hourlyMax: { type: Number, default: 60 },
+  },
+  countersWindow: {
+    dayCount: { type: Number, default: 0 },
+    dayStart: { type: Date, default: null },
+    hourCount: { type: Number, default: 0 },
+    hourStart: { type: Date, default: null },
+  },
+  lastLimitUpdateAt: { type: Date, default: null },
+  limitChangeReason: { type: String, default: null },
 }, { timestamps: true });
 
 const proxyServerSchema = new mongoose.Schema({
@@ -440,6 +505,28 @@ export type Session = BaseDocument & {
   lastResetAuthAt?: Date | null;
   reconnectCount?: number;
   lastReconnectAt?: Date | null;
+  healthStatus?: "unknown" | "healthy" | "warning" | "risky" | "cooldown" | "blocked";
+  healthScore?: number;
+  healthReason?: string | null;
+  healthUpdatedAt?: Date | null;
+  cooldownUntil?: Date | null;
+  strikeCount?: number;
+  lastStrikeAt?: Date | null;
+  lastStrikeReason?: string | null;
+  sendLimits?: {
+    tokensPerMinute: number;
+    bucketSize: number;
+    dailyMax: number;
+    hourlyMax: number;
+  };
+  countersWindow?: {
+    dayCount: number;
+    dayStart?: Date | null;
+    hourCount: number;
+    hourStart?: Date | null;
+  };
+  lastLimitUpdateAt?: Date | null;
+  limitChangeReason?: string | null;
 };
 
 export type InsertProxyServer = z.infer<typeof insertProxyServerSchema>;

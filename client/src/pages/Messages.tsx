@@ -42,6 +42,7 @@ import { getErrorMessage } from "@/lib/errors";
 import type { Contact, Debtor, Message } from "@shared/schema";
 
 export default function Messages() {
+  const MANUAL_SEND_SESSION_STORAGE_KEY = "messages:preferred-session-id";
   const { data: user } = useAuthMe();
   const canManualSend = user?.role === "admin" || user?.role === "supervisor";
   const { data: messages, isLoading: messagesLoading } = useMessages();
@@ -68,6 +69,61 @@ export default function Messages() {
   const lastViewedMessageTimes = useRef(new Map<string, number>());
 
   const connectedSessions = sessions?.filter(s => s.status === 'connected') || [];
+  const connectedSessionIdSet = useMemo(
+    () => new Set(connectedSessions.map((session) => session.id)),
+    [connectedSessions]
+  );
+
+  useEffect(() => {
+    if (!canManualSend) return;
+    if (selectedSessionId) return;
+
+    try {
+      const stored =
+        typeof window !== "undefined"
+          ? window.localStorage.getItem(MANUAL_SEND_SESSION_STORAGE_KEY)
+          : null;
+      if (stored && connectedSessionIdSet.has(stored)) {
+        setSelectedSessionId(stored);
+        return;
+      }
+    } catch {
+      // ignore storage failures
+    }
+
+    if (connectedSessions.length === 1) {
+      setSelectedSessionId(connectedSessions[0].id);
+    }
+  }, [
+    canManualSend,
+    connectedSessionIdSet,
+    connectedSessions,
+    selectedSessionId,
+  ]);
+
+  const formatSendError = (error: any): string | null => {
+    const data = error?.response?.data;
+    const code = data?.error;
+    if (code === "blocked") {
+      return "Sesión bloqueada por política de salud. Detén el envío y revisa la sesión.";
+    }
+    if (code === "cooldown") {
+      const until = data?.cooldownUntil ? new Date(data.cooldownUntil) : null;
+      return until && !Number.isNaN(until.getTime())
+        ? `Sesión en cooldown hasta ${until.toLocaleString()}.`
+        : "Sesión en cooldown temporal. Intenta más tarde.";
+    }
+    if (code === "rate_limited") {
+      const retryAfterMs = Number(data?.retryAfterMs ?? 0);
+      const seconds = retryAfterMs > 0 ? Math.ceil(retryAfterMs / 1000) : null;
+      const scope = data?.limitScope ? String(data.limitScope) : null;
+      const suffix = seconds ? ` Reintenta en ~${seconds}s.` : "";
+      const scopeLabel =
+        scope === "minute" ? "por minuto" : scope === "hour" ? "por hora" : scope === "day" ? "por día" : null;
+      return `Rate limit ${scopeLabel ?? ""}.`.trim() + suffix;
+    }
+    return null;
+  };
 
   const normalizePhoneDigits = (value?: string | null) =>
     (value ?? "").replace(/\D/g, "");
@@ -107,6 +163,14 @@ export default function Messages() {
     }
 
     return { byFull, bySuffix8, bySuffix9 };
+  }, [debtors]);
+
+  const debtorById = useMemo(() => {
+    const map = new Map<string, Debtor>();
+    for (const debtor of debtors ?? []) {
+      map.set(debtor.id, debtor);
+    }
+    return map;
   }, [debtors]);
 
   const contactByPhone = useMemo(() => {
@@ -200,23 +264,36 @@ export default function Messages() {
 
     for (const message of messages ?? []) {
       const rawPhone = message.phone ?? "";
-      const phoneKey = normalizeConversationKey(rawPhone);
+      const isGroupConversation = /@g\.us$/i.test(rawPhone);
+      const normalizedMessagePhone = normalizePhoneDigits(message.phoneNormalized ?? null);
+      const fallbackConversationKey = normalizeConversationKey(rawPhone);
+      const hasNonPhoneId = /@(lid|g\.us|broadcast)$/i.test(rawPhone);
+      const phoneDigits =
+        normalizedMessagePhone || (hasNonPhoneId ? "" : normalizePhoneDigits(rawPhone));
+      const debtorFromMessage = message.debtorId
+        ? debtorById.get(message.debtorId)
+        : undefined;
+      const debtor = debtorFromMessage ?? (phoneDigits ? findDebtorByPhone(phoneDigits) : undefined);
+      const normalizedDebtorPhone = debtor ? normalizePhoneDigits(debtor.phone) : "";
+      const phoneKey =
+        !isGroupConversation && normalizedDebtorPhone
+          ? normalizedDebtorPhone
+          : !isGroupConversation && normalizedMessagePhone
+          ? normalizedMessagePhone
+          : fallbackConversationKey;
       if (!phoneKey) continue;
 
-      const hasNonPhoneId = /@(lid|g\.us|broadcast)$/i.test(rawPhone);
-      const phoneDigits = hasNonPhoneId ? "" : normalizePhoneDigits(rawPhone);
-      const debtor = phoneDigits ? findDebtorByPhone(phoneDigits) : undefined;
       const contact = phoneDigits ? findContactByPhone(phoneDigits) : undefined;
       const existing = byPhone.get(phoneKey);
       const channel = (message.channel ?? "whatsapp").toLowerCase();
       const isIncoming = message.status === "received";
       const isFailed = message.status === "failed";
-      const isGroup = /@g\.us$/i.test(rawPhone) || /@g\.us$/i.test(phoneKey);
+      const isGroup = isGroupConversation || /@g\.us$/i.test(phoneKey);
 
       const conversation: Conversation =
         existing ?? {
           key: phoneKey,
-          phone: debtor?.phone ?? message.phone ?? phoneKey,
+          phone: debtor?.phone ?? contact?.phone ?? (phoneDigits || message.phone || phoneKey),
           debtor,
           contact,
           messages: [],
@@ -505,6 +582,20 @@ export default function Messages() {
 
   const handleSelectConversation = (conversation: Conversation) => {
     setSelectedConversationKey(conversation.key);
+
+    if (canManualSend) {
+      const preferredSessionId = conversation.lastMessageSessionId ?? null;
+      if (preferredSessionId && connectedSessionIdSet.has(preferredSessionId)) {
+        setSelectedSessionId(preferredSessionId);
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(
+            MANUAL_SEND_SESSION_STORAGE_KEY,
+            preferredSessionId
+          );
+        }
+      }
+    }
+
     lastViewedMessageTimes.current.set(
       conversation.key,
       conversation.lastMessageTime,
@@ -531,6 +622,39 @@ export default function Messages() {
     selectedConversation?.key,
     selectedConversation?.unreadCount,
     selectedConversation?.lastMessageTime,
+  ]);
+
+  useEffect(() => {
+    if (!canManualSend) return;
+
+    if (!connectedSessions.length) {
+      setSelectedSessionId(null);
+      return;
+    }
+
+    if (selectedSessionId && connectedSessionIdSet.has(selectedSessionId)) {
+      return;
+    }
+
+    let preferredSessionId: string | null = null;
+    if (typeof window !== "undefined") {
+      const stored = window.localStorage.getItem(MANUAL_SEND_SESSION_STORAGE_KEY);
+      if (stored && connectedSessionIdSet.has(stored)) {
+        preferredSessionId = stored;
+      }
+    }
+
+    if (!preferredSessionId) {
+      preferredSessionId = connectedSessions[0]?.id ?? null;
+    }
+
+    setSelectedSessionId(preferredSessionId);
+  }, [
+    canManualSend,
+    connectedSessionIdSet,
+    connectedSessions,
+    selectedSessionId,
+    MANUAL_SEND_SESSION_STORAGE_KEY,
   ]);
 
   const handleToggleArchive = async () => {
@@ -616,9 +740,16 @@ export default function Messages() {
         phone: targetPhone,
         message: messageText,
       });
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(
+          MANUAL_SEND_SESSION_STORAGE_KEY,
+          selectedSessionId
+        );
+      }
       setInputText("");
     } catch (error: any) {
-      alert("Error al enviar: " + getErrorMessage(error));
+      const policy = formatSendError(error);
+      alert("Error al enviar: " + (policy ?? getErrorMessage(error)));
     }
   };
 
@@ -767,8 +898,10 @@ export default function Messages() {
                   const lastMsg = conversation.lastMessage;
                   const displayName =
                     conversation.debtor?.name ?? conversation.contact?.name ?? conversation.phone;
+                  const displayPhone = conversation.phone || conversation.key;
                   const avatarText = (displayName || conversation.key).slice(0, 2).toUpperCase();
                   const lastTime = lastMsg ? conversation.lastMessageTime : 0;
+                  const showPhoneLine = Boolean(displayPhone && displayPhone !== displayName);
                   return (
                     <button
                       key={conversation.key}
@@ -806,6 +939,9 @@ export default function Messages() {
                             )}
                           </div>
                         </div>
+                        {showPhoneLine && (
+                          <p className="text-[11px] text-muted-foreground truncate">{displayPhone}</p>
+                        )}
                         <p
                           className={`text-sm truncate ${
                             conversation.unreadCount > 0

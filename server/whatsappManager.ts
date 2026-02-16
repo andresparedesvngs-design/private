@@ -6,7 +6,21 @@ import QRCode from 'qrcode';
 import { storage } from './storage';
 import type { Server as SocketServer } from 'socket.io';
 import { notificationService } from "./notificationService";
-import type { InsertMessage } from "@shared/schema";
+import {
+  MessageModel,
+  SessionModel,
+  type InsertMessage,
+  type Session,
+} from "@shared/schema";
+import {
+  computeSessionHealth,
+  getWindowRetryAfterMs,
+  normalizeCountersWindow,
+  normalizeSendLimits,
+  policyAdjustLimits,
+  type SessionRecentStats,
+} from "./healthPolicy";
+import { rateLimiter } from "./rateLimiter";
 
 export interface WhatsAppClient {
   id: string;
@@ -53,6 +67,33 @@ const RESET_AUTH_CREATE_TIMEOUT_MS = (() => {
   const parsed = raw ? Number(raw) : Number.NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 30000;
 })();
+
+type RecomputeHealthOptions = {
+  forceCooldown?: boolean;
+  strikeReason?: string;
+};
+
+export class WhatsAppSendPolicyError extends Error {
+  readonly code: "cooldown" | "blocked" | "rate_limited";
+  readonly retryAfterMs?: number;
+  readonly cooldownUntil?: string;
+  readonly limitScope?: "minute" | "hour" | "day";
+
+  constructor(args: {
+    code: "cooldown" | "blocked" | "rate_limited";
+    message: string;
+    retryAfterMs?: number;
+    cooldownUntil?: string;
+    limitScope?: "minute" | "hour" | "day";
+  }) {
+    super(args.message);
+    this.name = "WhatsAppSendPolicyError";
+    this.code = args.code;
+    this.retryAfterMs = args.retryAfterMs;
+    this.cooldownUntil = args.cooldownUntil;
+    this.limitScope = args.limitScope;
+  }
+}
 
 const clientAny = Client as any;
 if (!clientAny.__injectPatched) {
@@ -151,6 +192,181 @@ class WhatsAppManager {
           reject(error);
         });
     });
+  }
+
+  private toValidDate(value: unknown): Date | null {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(String(value));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  private isSpamLikeReason(reason?: string | null): boolean {
+    if (!reason) return false;
+    return /(spam|rate.?limit|blocked|ban)/i.test(reason);
+  }
+
+  private async getRecentSessionStats(sessionId: string): Promise<SessionRecentStats> {
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const outgoingBaseQuery: Record<string, any> = {
+      sessionId,
+      status: { $in: ["sent", "failed"] },
+      createdAt: { $gte: since24h },
+    };
+    const [sent24h, failed24h, delivered24h, read24h] = await Promise.all([
+      MessageModel.countDocuments(outgoingBaseQuery),
+      MessageModel.countDocuments({
+        ...outgoingBaseQuery,
+        status: "failed",
+      }),
+      MessageModel.countDocuments({
+        sessionId,
+        deliveredAt: { $gte: since24h },
+      }),
+      MessageModel.countDocuments({
+        sessionId,
+        readAt: { $gte: since24h },
+      }),
+    ]);
+
+    return {
+      sent24h,
+      failed24h,
+      delivered24h,
+      read24h,
+    };
+  }
+
+  async recomputeSessionHealth(
+    sessionId: string,
+    options?: RecomputeHealthOptions
+  ): Promise<void> {
+    if (!sessionId) return;
+    try {
+      const session = await SessionModel.findById(sessionId);
+      if (!session) return;
+      const recentStats = await this.getRecentSessionStats(sessionId);
+      const computed = computeSessionHealth(session, recentStats, options);
+
+      session.healthStatus = computed.healthStatus;
+      session.healthScore = computed.healthScore;
+      session.healthReason = computed.healthReason;
+      session.healthUpdatedAt = computed.healthUpdatedAt;
+      session.cooldownUntil = computed.cooldownUntil;
+      session.strikeCount = computed.strikeCount;
+      session.lastStrikeAt = computed.lastStrikeAt;
+      session.lastStrikeReason = computed.lastStrikeReason;
+
+      const adjustment = policyAdjustLimits(session, {
+        now: computed.healthUpdatedAt,
+      });
+      if (adjustment.changed) {
+        session.sendLimits = adjustment.sendLimits;
+        session.lastLimitUpdateAt = adjustment.lastLimitUpdateAt;
+        session.limitChangeReason = adjustment.limitChangeReason;
+      }
+
+      await session.save();
+      if (adjustment.changed) {
+        await storage.createSystemLog({
+          level: "info",
+          source: "policy",
+          message: `Session ${sessionId} limits adjusted`,
+          metadata: {
+            sessionId,
+            reason: adjustment.limitChangeReason,
+            limits: adjustment.sendLimits,
+            healthStatus: computed.healthStatus,
+            healthScore: computed.healthScore,
+          },
+        });
+      }
+      if (this.io) {
+        this.io.emit("session:updated", { id: sessionId });
+      }
+    } catch (error: any) {
+      console.warn(
+        `[wa][${sessionId}] failed to recompute health:`,
+        error?.message ?? error
+      );
+    }
+  }
+
+  async getSessionLimits(sessionId: string): Promise<{
+    sessionId: string;
+    healthStatus: Session["healthStatus"];
+    healthScore: number;
+    cooldownUntil: string | null;
+    sendLimits: NonNullable<Session["sendLimits"]>;
+    countersWindow: NonNullable<Session["countersWindow"]>;
+    lastLimitUpdateAt: string | null;
+    limitChangeReason: string | null;
+  } | null> {
+    const session = await SessionModel.findById(sessionId);
+    if (!session) return null;
+    const now = new Date();
+    const normalizedLimits = normalizeSendLimits(session.sendLimits);
+    const normalizedCounters = normalizeCountersWindow(session.countersWindow, now);
+    let changed = false;
+
+    if (JSON.stringify(session.sendLimits ?? {}) !== JSON.stringify(normalizedLimits)) {
+      session.sendLimits = normalizedLimits;
+      changed = true;
+    }
+    if (normalizedCounters.changed) {
+      session.countersWindow = normalizedCounters.value;
+      changed = true;
+    }
+    if (changed) {
+      await session.save();
+    }
+
+    return {
+      sessionId: String(session._id),
+      healthStatus: (session.healthStatus as Session["healthStatus"]) ?? "unknown",
+      healthScore: Number(session.healthScore ?? 0),
+      cooldownUntil: this.toValidDate(session.cooldownUntil)?.toISOString() ?? null,
+      sendLimits: normalizedLimits,
+      countersWindow: normalizedCounters.value,
+      lastLimitUpdateAt: this.toValidDate(session.lastLimitUpdateAt)?.toISOString() ?? null,
+      limitChangeReason: session.limitChangeReason
+        ? String(session.limitChangeReason)
+        : null,
+    };
+  }
+
+  async setSessionLimits(
+    sessionId: string,
+    patch: Partial<Session["sendLimits"]>
+  ): Promise<Session["sendLimits"] | null> {
+    const session = await SessionModel.findById(sessionId);
+    if (!session) return null;
+
+    const nextLimits = normalizeSendLimits({
+      ...(session.sendLimits ?? {}),
+      ...(patch ?? {}),
+    });
+    session.sendLimits = nextLimits;
+    session.lastLimitUpdateAt = new Date();
+    session.limitChangeReason = "manual_override";
+    await session.save();
+
+    rateLimiter.configureSession(sessionId, {
+      tokensPerMinute: nextLimits.tokensPerMinute,
+      bucketSize: nextLimits.bucketSize,
+    });
+
+    await storage.createSystemLog({
+      level: "warning",
+      source: "policy",
+      message: `Session ${sessionId} limits overridden manually`,
+      metadata: { sessionId, sendLimits: nextLimits },
+    });
+
+    if (this.io) {
+      this.io.emit("session:updated", { id: sessionId });
+    }
+
+    return nextLimits;
   }
 
   private isManualQrMode(): boolean {
@@ -494,6 +710,13 @@ class WhatsAppManager {
       disconnectCount: (persistedSession?.disconnectCount ?? 0) + 1,
       lastDisconnectAt: disconnectedAt,
       lastDisconnectReason: errorMessage ?? reason,
+    });
+    await this.recomputeSessionHealth(sessionId, {
+      forceCooldown: this.isSpamLikeReason(reason) || this.isSpamLikeReason(errorMessage),
+      strikeReason:
+        this.isSpamLikeReason(reason) || this.isSpamLikeReason(errorMessage)
+          ? "disconnect_spam_pattern"
+          : "disconnect_event",
     });
 
     if (wasConnected) {
@@ -1009,6 +1232,7 @@ class WhatsAppManager {
         qrCode: null,
         lastActive: new Date()
       });
+      await this.recomputeSessionHealth(sessionId);
 
       if (this.io) {
         this.io.emit('session:ready', {
@@ -1157,6 +1381,10 @@ class WhatsAppManager {
         status: 'auth_failed',
         authFailureCount: (sessionSnapshot?.authFailureCount ?? 0) + 1,
         lastAuthFailureAt: new Date(),
+      });
+      await this.recomputeSessionHealth(sessionId, {
+        forceCooldown: true,
+        strikeReason: "auth_failure",
       });
 
       if (this.io) {
@@ -1431,6 +1659,10 @@ class WhatsAppManager {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`[wa][${sessionId}] resetSessionAuth error:`, message);
       await storage.updateSession(sessionId, { status: "auth_failed" });
+      await this.recomputeSessionHealth(sessionId, {
+        forceCooldown: true,
+        strikeReason: "reset_auth_failed",
+      });
       await storage.createSystemLog({
         level: "error",
         source: "whatsapp",
@@ -1456,7 +1688,85 @@ class WhatsAppManager {
       throw new Error('Session not connected');
     }
 
+    const sessionDoc = await SessionModel.findById(sessionId);
+    if (!sessionDoc) {
+      throw new Error("Session not found in database");
+    }
+
     try {
+      const now = new Date();
+      const cooldownUntil = this.toValidDate(sessionDoc.cooldownUntil);
+      if (String(sessionDoc.healthStatus ?? "").toLowerCase() === "blocked") {
+        throw new WhatsAppSendPolicyError({
+          code: "blocked",
+          message: "Session blocked by health policy",
+        });
+      }
+      if (cooldownUntil && cooldownUntil.getTime() > now.getTime()) {
+        throw new WhatsAppSendPolicyError({
+          code: "cooldown",
+          message: "Session is in cooldown",
+          cooldownUntil: cooldownUntil.toISOString(),
+        });
+      }
+
+      const normalizedLimits = normalizeSendLimits(sessionDoc.sendLimits);
+      const normalizedCounters = normalizeCountersWindow(
+        sessionDoc.countersWindow,
+        now
+      );
+      let needsPersistBeforeSend = false;
+
+      if (JSON.stringify(sessionDoc.sendLimits ?? {}) !== JSON.stringify(normalizedLimits)) {
+        sessionDoc.sendLimits = normalizedLimits;
+        needsPersistBeforeSend = true;
+      }
+      if (normalizedCounters.changed) {
+        sessionDoc.countersWindow = normalizedCounters.value;
+        needsPersistBeforeSend = true;
+      }
+
+      const counters = normalizedCounters.value;
+      if (normalizedLimits.dailyMax <= 0 || counters.dayCount >= normalizedLimits.dailyMax) {
+        if (needsPersistBeforeSend) {
+          await sessionDoc.save();
+        }
+        throw new WhatsAppSendPolicyError({
+          code: "rate_limited",
+          message: "Daily send limit reached for session",
+          retryAfterMs: getWindowRetryAfterMs(counters, "day", now),
+          limitScope: "day",
+        });
+      }
+      if (normalizedLimits.hourlyMax <= 0 || counters.hourCount >= normalizedLimits.hourlyMax) {
+        if (needsPersistBeforeSend) {
+          await sessionDoc.save();
+        }
+        throw new WhatsAppSendPolicyError({
+          code: "rate_limited",
+          message: "Hourly send limit reached for session",
+          retryAfterMs: getWindowRetryAfterMs(counters, "hour", now),
+          limitScope: "hour",
+        });
+      }
+
+      rateLimiter.configureSession(sessionId, {
+        tokensPerMinute: normalizedLimits.tokensPerMinute,
+        bucketSize: normalizedLimits.bucketSize,
+      });
+      const tokenResult = rateLimiter.tryConsume(sessionId, 1);
+      if (!tokenResult.allowed) {
+        if (needsPersistBeforeSend) {
+          await sessionDoc.save();
+        }
+        throw new WhatsAppSendPolicyError({
+          code: "rate_limited",
+          message: "Per-minute rate limit reached for session",
+          retryAfterMs: tokenResult.retryAfterMs,
+          limitScope: "minute",
+        });
+      }
+
       const normalized = this.normalizePhoneForWhatsapp(phoneNumber);
       if (!normalized || !normalized.match(/^\d+$/)) {
         throw new Error(`Invalid phone number format: ${phoneNumber}`);
@@ -1474,17 +1784,22 @@ class WhatsAppManager {
         sentMessage?.id?._serialized ??
         sentMessage?.id?.id ??
         (typeof sentMessage?.id === "string" ? sentMessage.id : null);
-      
-      const session = await storage.getSession(sessionId);
-      if (session) {
-        await storage.updateSession(sessionId, {
-          messagesSent: session.messagesSent + 1,
-          lastActive: new Date()
-        });
-      }
+
+      sessionDoc.sendLimits = normalizedLimits;
+      sessionDoc.countersWindow = {
+        ...counters,
+        dayCount: counters.dayCount + 1,
+        hourCount: counters.hourCount + 1,
+      };
+      sessionDoc.messagesSent = Number(sessionDoc.messagesSent ?? 0) + 1;
+      sessionDoc.lastActive = now;
+      await sessionDoc.save();
 
       return { messageId: messageId ?? undefined };
     } catch (error: any) {
+      if (error instanceof WhatsAppSendPolicyError) {
+        throw error;
+      }
       console.error('Error sending message:', error.message);
       
       if (error.message.includes('detached Frame') || 

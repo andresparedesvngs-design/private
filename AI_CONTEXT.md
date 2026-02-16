@@ -4,11 +4,12 @@
 
 - **Fuente de verdad**: el código del repositorio. La documentación interna (por ejemplo `replit.md`) puede estar desactualizada y debe validarse contra el código.
 - **No asumir**: si algo no está explícitamente en el código, marcarlo como **UNKNOWN**.
+- **Última actualización de este documento**: 2026-02-16.
 
 ## 1. Arquitectura real (backend + frontend)
 
 - Monorepo con tres bloques: `server/` (Express + Socket.IO), `client/` (React + Vite) y `shared/` (Zod + Mongoose + tipos compartidos). Ver `server/index.ts`, `client/src/App.tsx`, `shared/schema.ts`.
-- **Backend**: Node.js + TypeScript, Express, Socket.IO, Mongoose/MongoDB, Passport Local, whatsapp-web.js y sistema de campañas. Ver `server/index.ts`, `server/routes.ts`, `server/campaignEngine.ts`, `server/storage.ts`, `server/whatsappManager.ts`, `server/smsManager.ts`.
+- **Backend**: Node.js + TypeScript, Express, Socket.IO, Mongoose/MongoDB, Passport Local, whatsapp-web.js y motor de campañas; incluye política de salud/límites de envío (`server/healthPolicy.ts`) y rate limiter por sesión (`server/rateLimiter.ts`). Ver `server/index.ts`, `server/routes.ts`, `server/campaignEngine.ts`, `server/storage.ts`, `server/whatsappManager.ts`, `server/smsManager.ts`.
 - **Frontend**: React + Vite, wouter, TanStack React Query, shadcn/ui, sockets para tiempo real. Ver `client/src/App.tsx`, `client/src/lib/api.ts`, `client/src/lib/socket.ts`.
 - **Frontend/UI (rutas expuestas)**: Panel, Sesiones, Campañas, Mensajes, Deudores, Contactos, Registros, Configuración y Proxy Servers. No hay ruta `/cleanup` en el router ni opción de menú. Ver `client/src/components/layout/AppSidebar.tsx`, `client/src/App.tsx`.
 - **Base de datos**: MongoDB vía Mongoose (`server/db.ts`, `shared/schema.ts`).
@@ -17,7 +18,7 @@
 ## 2. Ejecución del sistema (visión operativa)
 
 - `server/index.ts` crea el servidor Express y registra middleware, auth y rutas; en dev integra Vite con `server/vite.ts`, y en prod sirve estáticos con `server/static.ts`.
-- El servidor escucha en **localhost** con el puerto `PORT` (por defecto 5000). Ver `server/index.ts`.
+- El servidor escucha en `HOST` (default `localhost` en dev y `0.0.0.0` en prod) con el puerto `PORT` (default 5000). Ver `server/index.ts`.
 - El frontend se sirve desde el mismo servidor en desarrollo (Vite middleware) y desde `dist/public` en producción. Ver `server/vite.ts`, `server/static.ts`.
 
 ## 3. Autenticación y control de acceso
@@ -30,7 +31,7 @@
 ## 4. Contratos de dominio (fuente: shared/schema.ts)
 
 ### 4.1 Session (WhatsApp)
-- Campos: `phoneNumber`, `status`, `qrCode`, `battery`, `messagesSent`, `lastActive`, `purpose`, `proxyServerId`, `proxyLocked`, timestamps. Ver `shared/schema.ts`.
+- Campos: `phoneNumber`, `status`, `qrCode`, `battery`, `messagesSent`, `lastActive`, `purpose`, `proxyServerId`, `proxyLocked`, `authClientId`, `disconnectCount`, `lastDisconnectAt`, `lastDisconnectReason`, `authFailureCount`, `lastAuthFailureAt`, `resetAuthCount`, `lastResetAuthAt`, `reconnectCount`, `lastReconnectAt`, `healthStatus`, `healthScore`, `healthReason`, `healthUpdatedAt`, `cooldownUntil`, `strikeCount`, `lastStrikeAt`, `lastStrikeReason`, `sendLimits`, `countersWindow`, `lastLimitUpdateAt`, `limitChangeReason`, timestamps. Ver `shared/schema.ts`.
 - Estados observados en backend/UI: `initializing`, `qr_ready`, `authenticated`, `connected`, `reconnecting`, `auth_failed`, `disconnected`. Ver `server/whatsappManager.ts`, `client/src/pages/Sessions.tsx`.
 - El `status` persistido puede quedar desfasado frente al estado real; ver “Estado verificado de sesión”.
 
@@ -42,6 +43,12 @@
 - **Campañas**: `campaignEngine` usa solo sesiones verificadas.
 - Endpoint admin: `GET /api/sessions/health`.
 - Verificación manual: `POST /api/sessions/verify-now` (admin/supervisor) fuerza heartbeat sin reconectar ni generar QR.
+
+### Salud y límites de envío de sesión
+- **Health policy**: `whatsappManager` recomputa salud y puede aplicar `cooldown`/`blocked` ante patrones de riesgo (auth failures repetidos, reset-auth atascado, bursts de disconnects, métricas recientes). Ver `server/healthPolicy.ts`, `server/whatsappManager.ts`.
+- **Efecto**: si `healthStatus="blocked"` o `cooldownUntil` vigente, `whatsappManager.sendMessage(...)` rechaza envíos con error de política (`blocked`/`cooldown`). Ver `server/whatsappManager.ts`.
+- **Rate limits**: además del token bucket por minuto (`server/rateLimiter.ts`), se aplican máximos por hora/día usando `Session.sendLimits` + `Session.countersWindow` persistidos en Mongo. Ver `server/whatsappManager.ts`, `shared/schema.ts`.
+- Endpoints: `GET /api/sessions/:id/limits`, `POST /api/sessions/:id/limits/recompute`, `POST /api/sessions/:id/limits/set` (admin). Ver `server/routes.ts`.
 
 ### 4.2 Pool (WhatsApp routing)
 - Campos: `name`, `strategy`, `delayBase`, `delayVariation`, `sessionIds`, `active`. Ver `shared/schema.ts`.
@@ -72,7 +79,7 @@
 
 ### 4.8 Message
 - Campos: `campaignId`, `debtorId`, `sessionId`, `phone`, `content`, `templateUsed`, `templateVariantIndex`, `channel`, `providerResponse`, `status`, `sentAt`, `deliveredAt`, `readAt`, `archived`, `error`. Ver `shared/schema.ts`.
-- Estados reales usados en código: `pending`, `sent`, `failed`, `received`. `delivered` existe en esquema pero no se asigna en backend → **UNKNOWN**. Ver `server/whatsappManager.ts`, `server/campaignEngine.ts`.
+- Estados reales usados en código: `pending`, `sent`, `failed`, `received`. Los “acks” no cambian `status`, pero actualizan `deliveredAt`/`readAt` vía evento `message_ack`. Ediciones actualizan `content` + `editedAt` vía `message_edit`. Ver `server/whatsappManager.ts`, `server/campaignEngine.ts`.
 
 ### 4.9 SystemLog
 - Campos: `level`, `source`, `message`, `metadata`. Ver `shared/schema.ts`.
@@ -101,6 +108,7 @@
 - Stop session: UI usa `/api/sessions/:id/stop` (detiene sin borrar). Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
 - Health de sesiones (admin): `GET /api/sessions/health` devuelve estado verificado y último heartbeat.
 - Validar sesiones: UI → `POST /api/sessions/verify-now`, luego refresca con `GET /api/sessions/health`.
+- Límites/health policy: UI puede consultar `GET /api/sessions/:id/limits` y forzar recomputo con `POST /api/sessions/:id/limits/recompute`. Ver `client/src/pages/Sessions.tsx`, `server/routes.ts`, `server/whatsappManager.ts`.
 
 ### 5.10 Proxy Servers (admin)
 - CRUD y check manual: UI → `/api/proxy-servers` (GET/POST/PATCH/DELETE) + `/api/proxy-servers/:id/check`. Ver `client/src/pages/ProxyServers.tsx`, `server/routes.ts`.
@@ -121,8 +129,9 @@
 - `whatsappManager` guarda mensajes entrantes como `Message.status="received"` y actualiza `Debtor.lastContact`. Emite `message:received`. Ver `server/whatsappManager.ts`.
 
 ### 5.6 Deudores
-- Importación CSV/XLSX: cliente parsea y envía `/api/debtors/bulk`; backend valida con Zod y guarda en Mongo. Ver `client/src/pages/Debtors.tsx`, `server/routes.ts`.
+- Importación CSV/XLSX: el cliente puede subir directo a campaña vía `POST /api/campaigns/:id/debtors/bulk` (fuerza `campaignId`), y también existe `POST /api/debtors/bulk` (bulk genérico). Ver `client/src/pages/Campaigns.tsx`, `client/src/pages/Debtors.tsx`, `server/routes.ts`.
 - Limpieza, reset y liberación: `/api/debtors/cleanup`, `/api/debtors/reset`, `/api/debtors/release`. Ver `server/routes.ts`, `server/storage.ts`.
+- Deduplicación por teléfono: `POST /api/debtors/deduplicate` mergea duplicados, reasigna mensajes al “keeper” y borra el resto. Ver `server/storage.ts`, `server/routes.ts`.
 
 ### 5.7 Mensajería UI
 - UI agrupa conversaciones por teléfono, permite archivar, marcar leído y eliminar. Endpoints: `/api/messages/conversation/*`. Ver `client/src/pages/Messages.tsx`, `server/routes.ts`, `server/storage.ts`.
@@ -161,6 +170,9 @@
 - `GET /api/sessions`, `GET /api/sessions/:id`, `POST /api/sessions`, `PATCH /api/sessions/:id`, `DELETE /api/sessions/:id`
 - `GET /api/sessions/health` (admin)
 - `POST /api/sessions/verify-now` (admin/supervisor)
+- `GET /api/sessions/:id/limits`
+- `POST /api/sessions/:id/limits/recompute`
+- `POST /api/sessions/:id/limits/set` (admin)
 - `POST /api/sessions/:id/reconnect`, `POST /api/sessions/:id/reset-auth`, `POST /api/sessions/:id/qr`, `POST /api/sessions/:id/stop`
 - `POST /api/sessions/:id/send` (envío manual)
 
@@ -171,6 +183,7 @@
 
 ### Pools (WhatsApp)
 - `GET /api/pools`, `GET /api/pools/:id`, `POST /api/pools`, `PATCH /api/pools/:id`, `DELETE /api/pools/:id`
+- `POST /api/pools/:poolId/verify-debtors`
 
 ### GSM Lines / Pools (SMS)
 - `GET /api/gsm-lines`, `GET /api/gsm-lines/:id`, `POST /api/gsm-lines`, `PATCH /api/gsm-lines/:id`, `DELETE /api/gsm-lines/:id`
@@ -178,12 +191,21 @@
 
 ### Campaigns
 - `GET /api/campaigns`, `GET /api/campaigns/:id`, `POST /api/campaigns`, `PATCH /api/campaigns/:id`, `DELETE /api/campaigns/:id`
+- `POST /api/campaigns/:id/debtors/bulk`
 - `POST /api/campaigns/:id/start`, `POST /api/campaigns/:id/pause`, `POST /api/campaigns/:id/retry-failed`
 
 ### Debtors
 - `GET /api/debtors`, `GET /api/debtors/:id`, `POST /api/debtors`, `POST /api/debtors/bulk`, `PATCH /api/debtors/:id`, `DELETE /api/debtors/:id`
 - `PATCH /api/debtors/:id/assign`, `POST /api/debtors/assign-bulk`
-- `POST /api/debtors/reset`, `POST /api/debtors/cleanup`, `POST /api/debtors/release`
+- `POST /api/debtors/reset`, `POST /api/debtors/cleanup`, `POST /api/debtors/release`, `POST /api/debtors/deduplicate`
+
+### Debug (admin)
+- `GET /api/debug/admin-status`
+
+### WhatsApp verifications (admin/supervisor)
+- `GET /api/whatsapp-verifications/batches`
+- `GET /api/whatsapp-verifications/:batchId`
+- `GET /api/whatsapp-verifications/:batchId/export`
 
 ### Contacts
 - `GET /api/contacts`, `PATCH /api/contacts/:id`
@@ -206,13 +228,15 @@
 
 - Sesiones: `session:created`, `session:updated`, `session:deleted`, `session:qr`, `session:ready`, `session:auth_failed`, `session:disconnected`, `session:reconnecting`. Ver `server/routes.ts`, `server/whatsappManager.ts`.
 - Campañas: `campaign:started`, `campaign:paused`, `campaign:updated`, `campaign:progress`, `campaign:error`, `campaign:cooldown`. La UI usa `campaign:error` para mostrar badge/tooltip de error, sin estado `status="error"`. Ver `server/routes.ts`, `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
-- Mensajes: `message:created`, `message:received`. Ver `server/campaignEngine.ts`, `server/whatsappManager.ts`.
+- Pools: `pool:updated`. Ver `server/routes.ts`, `server/campaignEngine.ts`, `client/src/lib/socket.ts`.
+- Mensajes: `message:created`, `message:received`, `message:status`, `message:edited`. Ver `server/campaignEngine.ts`, `server/whatsappManager.ts`, `client/src/lib/socket.ts`.
 - Proxies: `proxy:updated`. Ver `server/proxyMonitor.ts`, `client/src/lib/socket.ts`.
 
 ## 8. Invariantes operativas (no romper)
 
 - **Campañas**: WhatsApp requiere `poolId` con sesiones asignadas; SMS requiere `smsPoolId` con líneas activas. Si no se cumplen, la campaña se pausa o falla. Ver `server/campaignEngine.ts`.
 - **Sesiones verificadas**: las campañas solo usan sesiones con `verifiedConnected=true`. Si no hay, se pausa la campaña y queda log de espera.
+- **Política de salud + rate limits**: no saltarse `whatsappManager.sendMessage(...)` ni actualizar contadores “a mano”; ahí se aplican `blocked/cooldown/rate_limited` y se persisten `sendLimits`/`countersWindow`. Ver `server/whatsappManager.ts`, `server/healthPolicy.ts`, `server/rateLimiter.ts`.
 - **Estados de deudores**: el motor cambia `disponible → procesando → completado|fallado`. UI y reportes dependen de estos estados. Ver `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
 - **Templates**: `campaign.message` es obligatorio y se complementa con `messageVariants`. Tokens `{nombre}`, `{deuda}`, `{phone}`, y metadata `{<key>}` se reemplazan. Ver `server/campaignEngine.ts`, `client/src/pages/Campaigns.tsx`.
 - **Storage**: `storage` transforma `_id` a `id` y tipos Date; no saltarse esta capa si se cambia persistencia. Ver `server/storage.ts`.

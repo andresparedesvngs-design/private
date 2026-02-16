@@ -144,6 +144,12 @@ export interface IStorage {
   
   resetDebtorsStatus(): Promise<number>;
   cleanupDebtors(statuses?: string[]): Promise<number>;
+  deduplicateDebtorsByPhone(ownerUserId?: string | null): Promise<{
+    scanned: number;
+    mergedGroups: number;
+    removed: number;
+    updatedMessages: number;
+  }>;
   releaseDebtorsByStatus(statuses: string[]): Promise<number>;
   releaseDebtorsByStatusFromInactiveCampaigns(statuses: string[], ownerUserId?: string | null): Promise<number>;
   resetDebtorsForCampaign(campaignId: string, statuses: string[]): Promise<number>;
@@ -185,6 +191,135 @@ export class MongoStorage implements IStorage {
     };
   }
 
+  private normalizeOwnerUserId(ownerUserId?: string | null): string | null {
+    if (!ownerUserId) return null;
+    const trimmed = String(ownerUserId).trim();
+    if (!trimmed) return null;
+    return mongoose.isValidObjectId(trimmed) ? trimmed : null;
+  }
+
+  private buildDebtorScopeKey(phone: string, ownerUserId?: string | null): string {
+    const normalizedPhone = this.normalizePhone(phone);
+    const normalizedOwner = this.normalizeOwnerUserId(ownerUserId);
+    return `${normalizedPhone}::${normalizedOwner ?? "none"}`;
+  }
+
+  private matchDebtorOwnerScope(candidate: any, ownerUserId?: string | null): boolean {
+    const expectedOwner = this.normalizeOwnerUserId(ownerUserId);
+    const candidateOwner = candidate?.ownerUserId
+      ? String(candidate.ownerUserId)
+      : null;
+    return candidateOwner === expectedOwner;
+  }
+
+  private mergeDebtorMetadata(
+    currentMetadata: Record<string, any> | null | undefined,
+    incomingMetadata: Record<string, any> | null | undefined
+  ): Record<string, any> | undefined {
+    const current =
+      currentMetadata && typeof currentMetadata === "object"
+        ? currentMetadata
+        : undefined;
+    const incoming =
+      incomingMetadata && typeof incomingMetadata === "object"
+        ? incomingMetadata
+        : undefined;
+
+    if (!current && !incoming) {
+      return undefined;
+    }
+    return {
+      ...(current ?? {}),
+      ...(incoming ?? {}),
+    };
+  }
+
+  private async findExistingDebtorForUpsert(
+    phone: string,
+    ownerUserId?: string | null
+  ): Promise<any | undefined> {
+    const normalizedPhone = this.normalizePhone(phone);
+    if (!normalizedPhone) {
+      return undefined;
+    }
+
+    const suffix = normalizedPhone.slice(-8);
+    const candidates = await DebtorModel.find({
+      phone: { $regex: suffix, $options: "i" },
+    }).limit(100);
+
+    const exactMatches = candidates.filter(
+      (candidate) => this.normalizePhone(candidate.phone) === normalizedPhone
+    );
+    if (!exactMatches.length) {
+      return undefined;
+    }
+
+    return exactMatches.find((candidate) =>
+      this.matchDebtorOwnerScope(candidate, ownerUserId)
+    );
+  }
+
+  private async upsertDebtorByPhone(debtor: InsertDebtor): Promise<any> {
+    const incomingPhone = String(debtor.phone ?? "").trim();
+    const existing = await this.findExistingDebtorForUpsert(
+      incomingPhone,
+      debtor.ownerUserId
+    );
+    const mergedMetadata = this.mergeDebtorMetadata(
+      existing?.metadata ?? undefined,
+      debtor.metadata ?? undefined
+    );
+
+    if (!existing) {
+      const payload: InsertDebtor = {
+        ...debtor,
+        phone: incomingPhone,
+      };
+      if (mergedMetadata) {
+        payload.metadata = mergedMetadata;
+      }
+      return DebtorModel.create(payload);
+    }
+
+    const update: Record<string, any> = {
+      phone: incomingPhone,
+      name: debtor.name,
+      debt: debtor.debt,
+    };
+
+    if (debtor.rut !== undefined) {
+      update.rut = debtor.rut ?? null;
+    }
+    if (mergedMetadata) {
+      update.metadata = mergedMetadata;
+    }
+    if (debtor.ownerUserId !== undefined) {
+      update.ownerUserId = this.normalizeOwnerUserId(debtor.ownerUserId);
+    }
+    if (debtor.campaignId !== undefined) {
+      update.campaignId = debtor.campaignId;
+    }
+    if (debtor.lastContact !== undefined) {
+      update.lastContact = debtor.lastContact ?? null;
+    }
+    if (debtor.status !== undefined) {
+      const incomingStatus = String(debtor.status).trim();
+      const currentStatus = String(existing.status ?? "").trim();
+      const isDefaultStatus = incomingStatus === "disponible";
+      if (!isDefaultStatus || !currentStatus || currentStatus === "disponible") {
+        update.status = incomingStatus;
+      }
+    }
+
+    const updated = await DebtorModel.findByIdAndUpdate(
+      existing._id,
+      { $set: update },
+      { new: true }
+    );
+    return updated ?? existing;
+  }
+
   // MÃ©todos de transformaciÃ³n
   private transformSession(session: any): Session {
     if (!session) return session;
@@ -210,6 +345,28 @@ export class MongoStorage implements IStorage {
       lastResetAuthAt: obj.lastResetAuthAt ?? null,
       reconnectCount: obj.reconnectCount ?? 0,
       lastReconnectAt: obj.lastReconnectAt ?? null,
+      healthStatus: obj.healthStatus ?? "unknown",
+      healthScore: obj.healthScore ?? 0,
+      healthReason: obj.healthReason ?? null,
+      healthUpdatedAt: obj.healthUpdatedAt ?? null,
+      cooldownUntil: obj.cooldownUntil ?? null,
+      strikeCount: obj.strikeCount ?? 0,
+      lastStrikeAt: obj.lastStrikeAt ?? null,
+      lastStrikeReason: obj.lastStrikeReason ?? null,
+      sendLimits: {
+        tokensPerMinute: obj.sendLimits?.tokensPerMinute ?? 6,
+        bucketSize: obj.sendLimits?.bucketSize ?? 10,
+        dailyMax: obj.sendLimits?.dailyMax ?? 200,
+        hourlyMax: obj.sendLimits?.hourlyMax ?? 60,
+      },
+      countersWindow: {
+        dayCount: obj.countersWindow?.dayCount ?? 0,
+        dayStart: obj.countersWindow?.dayStart ?? null,
+        hourCount: obj.countersWindow?.hourCount ?? 0,
+        hourStart: obj.countersWindow?.hourStart ?? null,
+      },
+      lastLimitUpdateAt: obj.lastLimitUpdateAt ?? null,
+      limitChangeReason: obj.limitChangeReason ?? null,
       createdAt: obj.createdAt,
       updatedAt: obj.updatedAt
     };
@@ -846,7 +1003,7 @@ export class MongoStorage implements IStorage {
   }
 
   async createDebtor(debtor: InsertDebtor): Promise<Debtor> {
-    const created = await DebtorModel.create(debtor);
+    const created = await this.upsertDebtorByPhone(debtor);
     const contactPayload = this.buildContactFromDebtor(this.transformDebtor(created));
     if (contactPayload) {
       await this.upsertContact(contactPayload);
@@ -855,14 +1012,23 @@ export class MongoStorage implements IStorage {
   }
 
   async createDebtors(debtors: InsertDebtor[]): Promise<Debtor[]> {
-    const created = await DebtorModel.insertMany(debtors);
-    await Promise.all(
-      created.map((debtor) => {
-        const contactPayload = this.buildContactFromDebtor(this.transformDebtor(debtor));
-        return contactPayload ? this.upsertContact(contactPayload) : Promise.resolve(null);
-      })
-    );
-    return created.map(d => this.transformDebtor(d));
+    const uniqueByScope = new Map<string, InsertDebtor>();
+
+    debtors.forEach((debtor, index) => {
+      const normalizedPhone = this.normalizePhone(String(debtor.phone ?? ""));
+      const scopeKey = normalizedPhone
+        ? this.buildDebtorScopeKey(debtor.phone, debtor.ownerUserId)
+        : `raw:${index}`;
+      uniqueByScope.set(scopeKey, debtor);
+    });
+
+    const results: Debtor[] = [];
+    for (const debtor of Array.from(uniqueByScope.values())) {
+      const saved = await this.createDebtor(debtor);
+      results.push(saved);
+    }
+
+    return results;
   }
 
   async updateDebtor(id: string, data: Partial<InsertDebtor>): Promise<Debtor | undefined> {
@@ -1122,6 +1288,152 @@ export class MongoStorage implements IStorage {
       statuses && statuses.length > 0 ? { status: { $in: statuses } } : {};
     const result = await DebtorModel.deleteMany(query);
     return result.deletedCount || 0;
+  }
+
+  async deduplicateDebtorsByPhone(ownerUserId?: string | null): Promise<{
+    scanned: number;
+    mergedGroups: number;
+    removed: number;
+    updatedMessages: number;
+  }> {
+    const normalizedOwner = this.normalizeOwnerUserId(ownerUserId);
+    if (ownerUserId && !normalizedOwner) {
+      return { scanned: 0, mergedGroups: 0, removed: 0, updatedMessages: 0 };
+    }
+
+    const query: Record<string, any> = {};
+    if (normalizedOwner) {
+      query.ownerUserId = normalizedOwner;
+    }
+
+    const debtors = await DebtorModel.find(query).sort({ updatedAt: -1, createdAt: -1 });
+    const groups = new Map<string, any[]>();
+
+    for (const debtor of debtors) {
+      const normalizedPhone = this.normalizePhone(String(debtor.phone ?? ""));
+      if (!normalizedPhone) continue;
+      const debtorOwner = debtor?.ownerUserId ? String(debtor.ownerUserId) : null;
+      const scopeKey = `${normalizedPhone}::${debtorOwner ?? "none"}`;
+      const current = groups.get(scopeKey) ?? [];
+      current.push(debtor);
+      groups.set(scopeKey, current);
+    }
+
+    const toMs = (value: unknown) => {
+      if (!value) return 0;
+      const parsed = new Date(value as any).getTime();
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    const pickStatus = (items: any[]) => {
+      const statuses = items
+        .map((item) => String(item?.status ?? "").trim())
+        .filter(Boolean);
+      const nonDefault = statuses.find((status) => status !== "disponible");
+      return nonDefault ?? statuses[0] ?? "disponible";
+    };
+
+    let mergedGroups = 0;
+    let removed = 0;
+    let updatedMessages = 0;
+
+    for (const group of Array.from(groups.values())) {
+      if (group.length < 2) continue;
+
+      const sorted = [...group].sort((a, b) => {
+        const aCampaign = a?.campaignId ? 1 : 0;
+        const bCampaign = b?.campaignId ? 1 : 0;
+        if (bCampaign !== aCampaign) return bCampaign - aCampaign;
+
+        const aHasProgressStatus = a?.status && a.status !== "disponible" ? 1 : 0;
+        const bHasProgressStatus = b?.status && b.status !== "disponible" ? 1 : 0;
+        if (bHasProgressStatus !== aHasProgressStatus) return bHasProgressStatus - aHasProgressStatus;
+
+        return toMs(b?.updatedAt) - toMs(a?.updatedAt);
+      });
+
+      const keeper = sorted[0];
+      const duplicates = sorted.slice(1);
+      if (!keeper || duplicates.length === 0) continue;
+
+      const allItems = [keeper, ...duplicates];
+      const mergedMetadata = allItems.reduce((acc, item) => {
+        if (item?.metadata && typeof item.metadata === "object") {
+          return { ...acc, ...item.metadata };
+        }
+        return acc;
+      }, {} as Record<string, any>);
+
+      const mergedCampaignId =
+        keeper.campaignId ??
+        duplicates.find((item) => item?.campaignId)?.campaignId ??
+        null;
+      const mergedRut =
+        keeper.rut ??
+        duplicates.find((item) => item?.rut)?.rut ??
+        null;
+      const mergedName =
+        String(keeper.name ?? "").trim() ||
+        String(duplicates.find((item) => String(item?.name ?? "").trim())?.name ?? "").trim() ||
+        keeper.phone;
+      const mergedDebtCandidates = allItems
+        .map((item) => Number(item?.debt))
+        .filter((value) => Number.isFinite(value));
+      const mergedDebt =
+        mergedDebtCandidates.length > 0
+          ? Math.max(...mergedDebtCandidates)
+          : Number(keeper.debt ?? 0);
+      const mergedLastContactMs = Math.max(...allItems.map((item) => toMs(item?.lastContact)));
+      const mergedLastContact = mergedLastContactMs > 0 ? new Date(mergedLastContactMs) : null;
+
+      const updatePayload: Record<string, any> = {
+        name: mergedName,
+        phone: keeper.phone,
+        debt: mergedDebt,
+        status: pickStatus(allItems),
+        campaignId: mergedCampaignId,
+        rut: mergedRut,
+      };
+      if (Object.keys(mergedMetadata).length > 0) {
+        updatePayload.metadata = mergedMetadata;
+      }
+      if (mergedLastContact) {
+        updatePayload.lastContact = mergedLastContact;
+      }
+
+      await DebtorModel.findByIdAndUpdate(keeper._id, { $set: updatePayload }, { new: true });
+
+      const duplicateIds = duplicates.map((item) => item._id);
+      if (duplicateIds.length) {
+        const messageUpdate = await MessageModel.updateMany(
+          { debtorId: { $in: duplicateIds } },
+          { $set: { debtorId: keeper._id } }
+        );
+        updatedMessages += messageUpdate.modifiedCount || 0;
+
+        const deletion = await DebtorModel.deleteMany({ _id: { $in: duplicateIds } });
+        removed += deletion.deletedCount || 0;
+      }
+
+      const refreshedKeeper = await DebtorModel.findById(keeper._id);
+      if (refreshedKeeper) {
+        const contactPayload = this.buildContactFromDebtor(
+          this.transformDebtor(refreshedKeeper)
+        );
+        if (contactPayload) {
+          await this.upsertContact(contactPayload);
+        }
+      }
+
+      mergedGroups += 1;
+    }
+
+    return {
+      scanned: debtors.length,
+      mergedGroups,
+      removed,
+      updatedMessages,
+    };
   }
 
   async releaseDebtorsByStatus(statuses: string[]): Promise<number> {

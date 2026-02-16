@@ -1439,6 +1439,10 @@ class CampaignEngine {
       }
 
       const messageChannel = channelUsed ?? (smsOnly ? "sms" : "whatsapp");
+      const storedPhone =
+        messageChannel === "whatsapp"
+          ? whatsappManager.normalizePhoneForWhatsapp(debtor.phone) || debtor.phone
+          : debtor.phone;
 
       if (sendSucceeded) {
         sentCount++;
@@ -1452,7 +1456,7 @@ class CampaignEngine {
           campaignId: campaign.id,
           debtorId: debtor.id,
           sessionId: usedTransportId,
-          phone: debtor.phone,
+          phone: storedPhone,
           content: personalizedMessage,
           templateUsed,
           templateVariantIndex: variantIndex,
@@ -1494,7 +1498,7 @@ class CampaignEngine {
           campaignId: campaign.id,
           debtorId: debtor.id,
           sessionId: usedTransportId,
-          phone: debtor.phone,
+          phone: storedPhone,
           content: personalizedMessage,
           templateUsed,
           templateVariantIndex: variantIndex,

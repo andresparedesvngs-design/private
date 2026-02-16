@@ -131,6 +131,17 @@ export function setupAuth(app: Express): {
   ensureAuthenticated: RequestHandler;
 } {
   const isProduction = process.env.NODE_ENV === "production";
+  const sessionCookieSecureRaw = (
+    process.env.SESSION_COOKIE_SECURE ?? ""
+  )
+    .trim()
+    .toLowerCase();
+  const sessionCookieSecure =
+    sessionCookieSecureRaw === "true"
+      ? true
+      : sessionCookieSecureRaw === "false"
+        ? false
+        : isProduction;
   const sessionSecret = getSessionSecret();
   const { username: adminUsername, password: adminPassword } =
     getAdminCredentials();
@@ -149,7 +160,7 @@ export function setupAuth(app: Express): {
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: isProduction,
+      secure: sessionCookieSecure,
       maxAge: ONE_WEEK_MS,
     },
   });

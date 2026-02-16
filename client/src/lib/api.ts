@@ -1133,6 +1133,28 @@ export function useCleanupDebtors() {
   });
 }
 
+export function useDeduplicateDebtors() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () =>
+      fetchApi<{
+        success: boolean;
+        scanned: number;
+        mergedGroups: number;
+        removed: number;
+        updatedMessages: number;
+      }>("/debtors/deduplicate", {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["debtors"] });
+      queryClient.invalidateQueries({ queryKey: ["messages"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+  });
+}
+
 export function useReleaseDebtors() {
   const queryClient = useQueryClient();
 

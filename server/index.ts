@@ -15,6 +15,16 @@ initFileLogging();
 const app = express();
 const httpServer = createServer(app);
 
+const trustProxyRaw = (process.env.TRUST_PROXY ?? "").trim();
+if (trustProxyRaw) {
+  const asNumber = Number(trustProxyRaw);
+  if (Number.isFinite(asNumber)) {
+    app.set("trust proxy", asNumber);
+  } else {
+    app.set("trust proxy", trustProxyRaw);
+  }
+}
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;
@@ -158,10 +168,11 @@ app.use((req, res, next) => {
   }
 
   const port = parseInt(process.env.PORT || "5000", 10);
-  
-  // SOLUCIÓN DEFINITIVA PARA WINDOWS
-  // Usar 'localhost' en lugar de '0.0.0.0'
-  httpServer.listen(port, "localhost", () => {
-    log(`serving on port ${port} (Windows compatible)`);
+  const host =
+    process.env.HOST ||
+    (process.env.NODE_ENV === "production" ? "0.0.0.0" : "localhost");
+
+  httpServer.listen(port, host, () => {
+    log(`serving on ${host}:${port}`);
   });
 })();

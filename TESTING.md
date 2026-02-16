@@ -5,6 +5,8 @@
 - **Vitest** configurado en `vitest.config.ts`.
 - **Unitarios**:
   - `server/smsManager.test.ts` (normalización de números en `SmsManager`).
+  - `server/rateLimiter.test.ts` (token bucket limiter por sesión).
+  - `server/healthPolicy.test.ts` (cálculo de salud + cooldown/blocked + normalización de límites).
   - `server/campaignEngine.helpers.test.ts` (selección de templates).
   - `server/whatsappManager.normalizePhoneForWhatsapp.test.ts` (normalización de teléfonos).
   - `client/src/lib/utils.test.ts` (helpers de ObjectId).

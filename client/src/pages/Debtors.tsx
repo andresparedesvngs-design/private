@@ -38,6 +38,7 @@ import {
   useBulkCreateDebtors,
   useResetDebtors,
   useCleanupDebtors,
+  useDeduplicateDebtors,
   useReleaseDebtors,
   useExecutives,
   useAssignDebtorsBulk,
@@ -59,6 +60,7 @@ export default function Debtors() {
   const bulkCreateDebtors = useBulkCreateDebtors();
   const resetDebtors = useResetDebtors();
   const cleanupDebtors = useCleanupDebtors();
+  const deduplicateDebtors = useDeduplicateDebtors();
   const releaseDebtors = useReleaseDebtors();
   const assignDebtorsBulk = useAssignDebtorsBulk();
   const { data: executives } = useExecutives(isSupervisorOrAdmin);
@@ -928,6 +930,26 @@ export default function Debtors() {
     }
   };
 
+  const handleDeduplicateDebtors = async () => {
+    if (!confirm("¿Deduplicar deudores por teléfono? Esta acción fusiona registros repetidos.")) {
+      return;
+    }
+
+    try {
+      const result = await deduplicateDebtors.mutateAsync();
+      alert(
+        `Deduplicación completada.\n` +
+          `Registros revisados: ${result.scanned}\n` +
+          `Grupos fusionados: ${result.mergedGroups}\n` +
+          `Registros eliminados: ${result.removed}\n` +
+          `Mensajes reasignados: ${result.updatedMessages}`
+      );
+    } catch (error) {
+      console.error("Failed to deduplicate debtors:", error);
+      alert("Error al deduplicar deudores");
+    }
+  };
+
   const handleAssignSelected = async () => {
     if (!selectedExecutiveId) {
       alert("Selecciona un ejecutivo");
@@ -1061,6 +1083,20 @@ export default function Debtors() {
                     <RotateCcw className="h-4 w-4" />
                   )}
                   Liberar disponibles
+                </Button>
+                <Button
+                  variant="outline"
+                  className="gap-2"
+                  onClick={handleDeduplicateDebtors}
+                  disabled={deduplicateDebtors.isPending}
+                  data-testid="button-deduplicate-debtors"
+                >
+                  {deduplicateDebtors.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Users className="h-4 w-4" />
+                  )}
+                  Deduplicar teléfonos
                 </Button>
               </>
             )}
