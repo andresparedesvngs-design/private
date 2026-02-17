@@ -6,6 +6,7 @@ build/
 .env
 .env.*
 !.env.example
+!.env.beta-rc.example
 .config/
 .local/
 .vscode/

@@ -2,6 +2,19 @@
 
 Ruta del proyecto objetivo: `/var/www/paredes_devs/WHS`
 
+## 0) Quickstart post-clone (recomendado)
+
+```bash
+cd /var/www/paredes_devs/WHS
+bash script/deploy-beta-rc.sh
+```
+
+El script:
+- crea `.env` desde `.env.beta-rc.example` (o `.env.example`) si falta
+- genera `SESSION_SECRET` si estÃ¡ en placeholder y existe `openssl`
+- crea `WWEBJS_AUTH_DIR` y `logs/pm2`
+- ejecuta `npm ci`, `npm run build`, `pm2 start/reload` y health check
+
 ## 1) Requisitos del servidor
 
 ```bash
@@ -22,29 +35,29 @@ sudo apt-get install -y \
   xdg-utils wget
 ```
 
-Si el binario Chrome/Chromium no se detecta automáticamente, define `PUPPETEER_EXECUTABLE_PATH` en `.env`.
+Si el binario Chrome/Chromium no se detecta automÃ¡ticamente, define `PUPPETEER_EXECUTABLE_PATH` en `.env`.
 
 ## 2) Directorios y permisos persistentes
 
 ```bash
-sudo mkdir -p /var/lib/whs/auth
-sudo chown -R www-data:www-data /var/lib/whs
+sudo mkdir -p /var/www/paredes_devs/whs-auth
+sudo chown -R www-data:www-data /var/www/paredes_devs/whs-auth
 
 cd /var/www/paredes_devs/WHS
 mkdir -p logs/pm2
 ```
 
-`WWEBJS_AUTH_DIR` recomendado en producción: `/var/lib/whs/auth`
+`WWEBJS_AUTH_DIR` recomendado en producciÃ³n: `/var/www/paredes_devs/whs-auth`
 
 ## 3) Variables de entorno
 
 ```bash
 cd /var/www/paredes_devs/WHS
-cp .env.example .env
+cp .env.beta-rc.example .env
 nano .env
 ```
 
-Valores mínimos para beta-RC:
+Valores mÃ­nimos para beta-RC:
 
 - `NODE_ENV=production`
 - `PORT=5000`
@@ -57,7 +70,7 @@ Valores mínimos para beta-RC:
 - `BASE_URL=https://beta-rc.tu-dominio.com`
 - `SOCKET_ORIGIN=https://beta-rc.tu-dominio.com`
 - `SOCKET_PATH=/socket.io`
-- `WWEBJS_AUTH_DIR=/var/lib/whs/auth`
+- `WWEBJS_AUTH_DIR=/var/www/paredes_devs/whs-auth`
 - `PUPPETEER_DISABLE_SANDBOX=true` (solo si tu host lo requiere)
 
 ## 4) Build y arranque inicial
@@ -131,7 +144,7 @@ pm2 reload ecosystem.config.cjs --env production
 pm2 status
 ```
 
-## 7) Troubleshooting rápido
+## 7) Troubleshooting rÃ¡pido
 
 - `502 Bad Gateway` en Nginx:
   - Verifica `pm2 status` y `curl http://127.0.0.1:5000/api/health`.

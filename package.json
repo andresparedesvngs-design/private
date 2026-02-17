@@ -9,6 +9,7 @@
     "build": "tsx script/build.ts",
     "start": "cross-env NODE_ENV=production node dist/index.cjs",
     "start:prod": "cross-env NODE_ENV=production node dist/index.cjs",
+    "deploy:beta-rc": "bash script/deploy-beta-rc.sh",
     "check": "tsc",
     "test": "vitest"
   },
