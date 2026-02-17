@@ -21,6 +21,7 @@ import {
   type SessionRecentStats,
 } from "./healthPolicy";
 import { rateLimiter } from "./rateLimiter";
+import { isTruthyEnv, resolveWwebjsAuthDir } from "./env";
 
 export interface WhatsAppClient {
   id: string;
@@ -161,6 +162,21 @@ class WhatsAppManager {
   private pollingEnabledOverride: boolean | null = null;
   private pollingIntervalOverrideMs: number | null = null;
   private qrWindowUntil: Map<string, number> = new Map();
+  private readonly authDataPath = resolveWwebjsAuthDir();
+
+  private ensureAuthDataPath(): void {
+    if (!fs.existsSync(this.authDataPath)) {
+      fs.mkdirSync(this.authDataPath, { recursive: true });
+    }
+  }
+
+  private isSafeAuthClientId(value: string): boolean {
+    return /^[a-zA-Z0-9_-]+$/.test(value);
+  }
+
+  private getAuthSessionDir(authClientId: string): string {
+    return path.join(this.authDataPath, `session-${authClientId}`);
+  }
 
   setSocketServer(io: SocketServer) {
     this.io = io;
@@ -529,6 +545,50 @@ class WhatsAppManager {
     }
 
     return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  }
+
+  private resolveChromePath(): string | undefined {
+    const envPath = (
+      process.env.PUPPETEER_EXECUTABLE_PATH ??
+      process.env.CHROME_PATH ??
+      ""
+    ).trim();
+    if (envPath) {
+      if (fs.existsSync(envPath)) {
+        return envPath;
+      }
+      console.warn(
+        `[wa] Ignoring missing browser executable from env: ${envPath}`
+      );
+    }
+
+    const candidates =
+      process.platform === "win32"
+        ? [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+            "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+          ]
+        : process.platform === "darwin"
+          ? [
+              "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+              "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            ]
+          : ["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"];
+
+    return candidates.find((candidate) => fs.existsSync(candidate));
+  }
+
+  private getExtraPuppeteerArgs(): string[] {
+    const raw = (process.env.PUPPETEER_ARGS ?? "").trim();
+    if (!raw) {
+      return [];
+    }
+    return raw
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
   }
 
   private getPollingEnabled(): boolean {
@@ -947,6 +1007,16 @@ class WhatsAppManager {
     }
 
     try {
+      if (messageId) {
+        const existing = await storage.getMessageByProviderResponse(
+          messageId,
+          sessionId
+        );
+        if (existing) {
+          return;
+        }
+      }
+
       const phone = await this.resolveIncomingPhone(msg);
       const debtor = await storage.getDebtorByPhone(phone);
       const sentAt =
@@ -1141,38 +1211,18 @@ class WhatsAppManager {
       proxyEndpoint = `${proxyServer.scheme}://${proxyServer.host}:${proxyServer.port}`;
     }
 
-    const resolveChromePath = () => {
-      const envPath = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
-      if (envPath && fs.existsSync(envPath)) {
-        return envPath;
-      }
+    this.ensureAuthDataPath();
 
-      const candidates =
-        process.platform === "win32"
-          ? [
-              "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-              "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-              "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-              "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-            ]
-          : process.platform === "darwin"
-            ? [
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-              ]
-            : ["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"];
-
-      return candidates.find((candidate) => fs.existsSync(candidate));
-    };
-
-    const executablePath = resolveChromePath();
+    const executablePath = this.resolveChromePath();
     const userAgent = this.resolveUserAgent();
-    const puppeteerArgs = [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-    ];
+    const disableSandbox = isTruthyEnv(
+      process.env.PUPPETEER_DISABLE_SANDBOX ?? "true"
+    );
+    const puppeteerArgs: string[] = ["--disable-gpu", "--disable-dev-shm-usage"];
+
+    if (disableSandbox) {
+      puppeteerArgs.push("--no-sandbox", "--disable-setuid-sandbox");
+    }
 
     if (userAgent) {
       puppeteerArgs.push(`--user-agent=${userAgent}`);
@@ -1184,16 +1234,18 @@ class WhatsAppManager {
       puppeteerArgs.push("--disable-features=WebRtcHideLocalIpsWithMdns");
     }
 
+    puppeteerArgs.push(...this.getExtraPuppeteerArgs());
+
     // CONFIGURACIÓN CORREGIDA CON LOCAL AUTH
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: resolvedAuthClientId,
-        dataPath: './.wwebjs_auth'
+        dataPath: this.authDataPath,
       }),
       puppeteer: {
         executablePath,
         args: puppeteerArgs,
-      }
+      },
     });
 
     const whatsappClient: WhatsAppClient = {
@@ -1421,9 +1473,6 @@ class WhatsAppManager {
       void this.handleIncomingMessage(sessionId, msg, "message");
     });
 
-    client.on("message_create", (msg) => {
-      void this.handleIncomingMessage(sessionId, msg, "message_create");
-    });
 
     client.on("message_ack", async (msg, ack) => {
       const messageId =
@@ -1551,21 +1600,11 @@ class WhatsAppManager {
           );
         }
       }
-      
-      // NO eliminar la carpeta de autenticación si quieres persistencia
-      /*
-      const fs = await import('fs');
-      const path = await import('path');
-      const sessionDir = path.join(process.cwd(), '.wwebjs_auth', `session-${sessionId}`);
-      if (fs.existsSync(sessionDir)) {
-        fs.rmSync(sessionDir, { recursive: true, force: true });
-      }
-      */
 
       if (removeAuth) {
         // Guard against path traversal.
-        if (/^[a-zA-Z0-9_-]+$/.test(authClientId)) {
-          const sessionDir = path.join(process.cwd(), ".wwebjs_auth", `session-${authClientId}`);
+        if (this.isSafeAuthClientId(authClientId)) {
+          const sessionDir = this.getAuthSessionDir(authClientId);
           try {
             await fs.promises.rm(sessionDir, { recursive: true, force: true });
           } catch (error: any) {
@@ -1622,8 +1661,8 @@ class WhatsAppManager {
         sessionId
       );
 
-      if (/^[a-zA-Z0-9_-]+$/.test(oldAuthClientId)) {
-        const sessionDir = path.join(process.cwd(), ".wwebjs_auth", `session-${oldAuthClientId}`);
+      if (this.isSafeAuthClientId(oldAuthClientId)) {
+        const sessionDir = this.getAuthSessionDir(oldAuthClientId);
         if (fs.existsSync(sessionDir)) {
           fs.rmSync(sessionDir, { recursive: true, force: true });
         }
@@ -2019,4 +2058,5 @@ class WhatsAppManager {
 }
 
 export const whatsappManager = new WhatsAppManager();
+
 

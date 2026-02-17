@@ -1,6 +1,9 @@
 import mongoose from "mongoose";
-
-const DEFAULT_MONGODB_URI = "mongodb://localhost:27017/whatsapp_campaigns";
+import {
+  DEFAULT_MONGO_URI,
+  getMongoUriOrDefault,
+  isProductionEnv,
+} from "./env";
 
 let connectPromise: Promise<typeof mongoose> | null = null;
 
@@ -13,10 +16,16 @@ export async function connectDatabase(): Promise<typeof mongoose> {
     return connectPromise;
   }
 
-  const uri = process.env.MONGODB_URI || DEFAULT_MONGODB_URI;
+  const configuredUri = getMongoUriOrDefault();
+  const usingDefaultLocalMongo = configuredUri === DEFAULT_MONGO_URI;
+  if (isProductionEnv() && usingDefaultLocalMongo) {
+    console.warn(
+      "[db] Using default local MongoDB URI in production. Set MONGO_URI (or MONGODB_URI) for remote/local managed DB."
+    );
+  }
 
   connectPromise = mongoose
-    .connect(uri)
+    .connect(configuredUri)
     .then((conn) => {
       console.log("MongoDB connected");
       return conn;
@@ -29,4 +38,3 @@ export async function connectDatabase(): Promise<typeof mongoose> {
 
   return connectPromise;
 }
-

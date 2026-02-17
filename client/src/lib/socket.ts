@@ -3,12 +3,16 @@ import { io, Socket } from 'socket.io-client';
 import { useQueryClient } from '@tanstack/react-query';
 
 let socket: Socket | null = null;
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL?.trim() || undefined;
+const SOCKET_PATH = import.meta.env.VITE_SOCKET_PATH?.trim() || "/socket.io";
 
 export function getSocket(): Socket {
   if (!socket) {
-    socket = io({
+    socket = io(SOCKET_URL, {
       autoConnect: false,
       withCredentials: true,
+      path: SOCKET_PATH,
+      transports: ["websocket", "polling"],
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,

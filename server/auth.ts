@@ -9,6 +9,7 @@ import type { Server as SocketServer } from "socket.io";
 import bcrypt from "bcryptjs";
 import { storage } from "./storage";
 import type { User } from "@shared/schema";
+import { getMongoUri, isTruthyEnv } from "./env";
 
 export interface AuthUser {
   id: string;
@@ -28,12 +29,6 @@ const ONE_WEEK_MS = 1000 * 60 * 60 * 24 * 7;
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin123";
 const DEFAULT_SESSION_SECRET = "dev-session-secret-change-me";
-
-const isTruthyEnv = (value: string | undefined) => {
-  if (!value) return false;
-  const normalized = value.trim().toLowerCase();
-  return ["true", "1", "yes", "on"].includes(normalized);
-};
 
 function getAdminCredentials(options?: {
   allowDefaults?: boolean;
@@ -215,11 +210,11 @@ export function setupAuth(app: Express): {
     .toLowerCase();
 
   const resolveMongoSessionStore = () => {
-    const mongoUrl = (process.env.MONGODB_URI ?? "").trim();
+    const mongoUrl = getMongoUri();
     if (!mongoUrl && mongoose.connection.readyState !== 1) {
       if (isProduction) {
         throw new Error(
-          "[auth] SESSION_STORE=mongo requires MONGODB_URI (or an active mongoose connection)."
+          "[auth] SESSION_STORE=mongo requires MONGO_URI or MONGODB_URI (or an active mongoose connection)."
         );
       }
       return null;

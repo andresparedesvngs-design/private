@@ -1,5 +1,5 @@
 import type { Express, RequestHandler } from "express";
-import { createServer, type Server } from "http";
+import { type Server } from "http";
 import { Server as SocketServer } from "socket.io";
 import { storage } from "./storage";
 import { whatsappManager, WhatsAppSendPolicyError } from "./whatsappManager";
@@ -8,6 +8,7 @@ import { proxyMonitor } from "./proxyMonitor";
 import { bindAuthToSocket, type AuthUser } from "./auth";
 import bcrypt from "bcryptjs";
 import { notificationService } from "./notificationService";
+import { getSocketOriginAllowlist, getSocketPath } from "./env";
 import {
   insertSessionSchema,
   insertProxyServerSchema,
@@ -26,15 +27,48 @@ export async function registerRoutes(
   app: Express,
   sessionMiddleware: RequestHandler
 ): Promise<Server> {
-  const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:5000";
-  
+  const socketPath = getSocketPath();
+  const configuredOrigins = getSocketOriginAllowlist();
+  const allowAnyOrigin =
+    configuredOrigins.length === 0 || configuredOrigins.includes("*");
+  const normalizedOrigins = configuredOrigins.map((value) =>
+    value.replace(/\/+$/, "")
+  );
+
+  const socketCorsOrigin = allowAnyOrigin
+    ? true
+    : (
+        origin: string | undefined,
+        callback: (err: Error | null, allow?: boolean) => void
+      ) => {
+        if (!origin) {
+          callback(null, true);
+          return;
+        }
+        const normalizedOrigin = origin.replace(/\/+$/, "");
+        const allowed = normalizedOrigins.includes(normalizedOrigin);
+        if (allowed) {
+          callback(null, true);
+          return;
+        }
+        callback(new Error(`Socket origin not allowed: ${origin}`));
+      };
+
   const io = new SocketServer(httpServer, {
+    path: socketPath,
+    transports: ["websocket", "polling"],
     cors: {
-      origin: CORS_ORIGIN,
+      origin: socketCorsOrigin,
       methods: ["GET", "POST"],
-      credentials: true
-    }
+      credentials: true,
+    },
   });
+
+  console.log(
+    `[socket] path=${socketPath} origins=${
+      allowAnyOrigin ? "*" : normalizedOrigins.join(",")
+    }`
+  );
 
   bindAuthToSocket(io, sessionMiddleware);
 
@@ -237,6 +271,149 @@ export async function registerRoutes(
     }
 
     return null;
+  };
+
+  type ReconnectSessionResult = {
+    sessionId: string;
+    ok: boolean;
+    category: "reconnected" | "skipped" | "failed";
+    reason: string;
+    httpStatus: number;
+    body: Record<string, unknown>;
+    details?: string;
+  };
+
+  const reconnectSingleSession = async (
+    sessionId: string
+  ): Promise<ReconnectSessionResult> => {
+    const session = await storage.getSession(sessionId);
+    if (!session) {
+      return {
+        sessionId,
+        ok: false,
+        category: "failed",
+        reason: "not_found",
+        httpStatus: 404,
+        body: { error: "Session not found" },
+      };
+    }
+
+    const healthGuard = resolveHealthGuard(session);
+    if (healthGuard) {
+      const reason = String((healthGuard.body as any)?.error ?? "health_guard");
+      return {
+        sessionId,
+        ok: false,
+        category: "skipped",
+        reason,
+        httpStatus: healthGuard.status,
+        body: healthGuard.body as Record<string, unknown>,
+      };
+    }
+
+    if (session.status === "auth_failed") {
+      return {
+        sessionId,
+        ok: false,
+        category: "skipped",
+        reason: "reset_required",
+        httpStatus: 409,
+        body: {
+          error: "reset_required",
+          message: "Session requires reset-auth before reconnect",
+          sessionId,
+        },
+      };
+    }
+
+    if (isSessionBusy(sessionId, session.status)) {
+      return {
+        sessionId,
+        ok: false,
+        category: "skipped",
+        reason: "busy",
+        httpStatus: 409,
+        body: {
+          error: "busy",
+          message: "Session is busy",
+          sessionId,
+        },
+      };
+    }
+
+    sessionBusyLocks.add(sessionId);
+    const reconnectAt = new Date();
+    console.log(`[routes][sessions][${sessionId}] reconnect start`);
+
+    try {
+      await storage.updateSession(sessionId, {
+        status: "reconnecting",
+        qrCode: null,
+      });
+
+      await withTimeout(
+        whatsappManager.destroySession(sessionId),
+        RECONNECT_DESTROY_TIMEOUT_MS,
+        `reconnect destroy session ${sessionId}`
+      );
+
+      await storage.updateSession(sessionId, {
+        status: "initializing",
+        qrCode: null,
+        reconnectCount: (session.reconnectCount ?? 0) + 1,
+        lastReconnectAt: reconnectAt,
+      });
+
+      await withTimeout(
+        whatsappManager.createSession(sessionId),
+        RECONNECT_CREATE_TIMEOUT_MS,
+        `reconnect create session ${sessionId}`
+      );
+    } catch (error: any) {
+      const message = error?.message ?? String(error);
+      const nextStatus = /auth/i.test(message) ? "auth_failed" : "disconnected";
+      console.error(`[routes][sessions][${sessionId}] reconnect failed:`, message);
+
+      await storage.updateSession(sessionId, {
+        status: nextStatus,
+      });
+
+      await storage.createSystemLog({
+        level: "error",
+        source: "whatsapp",
+        message: `Reconnect failed for session ${sessionId}`,
+        metadata: { sessionId, error: message },
+      });
+
+      return {
+        sessionId,
+        ok: false,
+        category: "failed",
+        reason: "reconnect_failed",
+        httpStatus: 500,
+        body: {
+          error: "reconnect_failed",
+          message: "No se pudo reconectar la sesion",
+          details: message,
+          sessionId,
+        },
+        details: message,
+      };
+    } finally {
+      sessionBusyLocks.delete(sessionId);
+    }
+
+    io.emit("session:reconnecting", { id: sessionId });
+    console.log(`[routes][sessions][${sessionId}] reconnect initiated`);
+
+    return {
+      sessionId,
+      ok: true,
+      category: "reconnected",
+      reason: "ok",
+      httpStatus: 200,
+      body: { message: "Reconnection initiated", sessionId },
+    };
   };
 
   const extractWaId = (value: any): string | null => {
@@ -729,6 +906,60 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/sessions/reconnect-all", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+
+      const sessions = await storage.getSessions();
+      const results: Array<{
+        sessionId: string;
+        status: "reconnected" | "skipped" | "failed";
+        reason: string;
+        message: string | null;
+        details: string | null;
+      }> = [];
+
+      for (const session of sessions) {
+        const result = await reconnectSingleSession(session.id);
+        const body = result.body as any;
+        const message =
+          typeof body?.message === "string"
+            ? body.message
+            : typeof body?.error === "string"
+              ? body.error
+              : null;
+        const details =
+          result.details ??
+          (typeof body?.details === "string" ? body.details : null);
+
+        results.push({
+          sessionId: session.id,
+          status: result.category,
+          reason: result.reason,
+          message,
+          details,
+        });
+      }
+
+      const reconnected = results.filter((item) => item.status === "reconnected").length;
+      const skipped = results.filter((item) => item.status === "skipped").length;
+      const failed = results.filter((item) => item.status === "failed").length;
+
+      res.json({
+        checked: sessions.length,
+        attempted: reconnected + failed,
+        reconnected,
+        skipped,
+        failed,
+        results,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/sessions/:id/reconnect", async (req, res) => {
     const sessionId = req.params.id;
     console.log(`[routes][sessions][${sessionId}] reconnect requested`);
@@ -737,93 +968,16 @@ export async function registerRoutes(
       if (!ensureRole(req, res, ["admin", "supervisor"])) {
         return;
       }
-      const session = await storage.getSession(sessionId);
-      if (!session) {
-        return res.status(404).json({ error: "Session not found" });
-      }
-      const healthGuard = resolveHealthGuard(session);
-      if (healthGuard) {
-        return res.status(healthGuard.status).json(healthGuard.body);
-      }
-
-      if (session.status === "auth_failed") {
+      const result = await reconnectSingleSession(sessionId);
+      if (!result.ok && result.reason === "reset_required") {
         console.warn(
           `[routes][sessions][${sessionId}] reconnect blocked: reset-auth required`
         );
-        return res.status(409).json({
-          error: "reset_required",
-          message: "Session requires reset-auth before reconnect",
-          sessionId,
-        });
       }
-
-      if (isSessionBusy(sessionId, session.status)) {
+      if (!result.ok && result.reason === "busy") {
         console.warn(`[routes][sessions][${sessionId}] reconnect blocked: busy`);
-        return res.status(409).json({
-          error: "busy",
-          message: "Session is busy",
-          sessionId,
-        });
       }
-
-      sessionBusyLocks.add(sessionId);
-      const reconnectAt = new Date();
-      console.log(`[routes][sessions][${sessionId}] reconnect start`);
-
-      try {
-        await storage.updateSession(sessionId, {
-          status: "reconnecting",
-          qrCode: null,
-        });
-
-        await withTimeout(
-          whatsappManager.destroySession(sessionId),
-          RECONNECT_DESTROY_TIMEOUT_MS,
-          `reconnect destroy session ${sessionId}`
-        );
-
-        await storage.updateSession(sessionId, {
-          status: "initializing",
-          qrCode: null,
-          reconnectCount: (session.reconnectCount ?? 0) + 1,
-          lastReconnectAt: reconnectAt,
-        });
-
-        await withTimeout(
-          whatsappManager.createSession(sessionId),
-          RECONNECT_CREATE_TIMEOUT_MS,
-          `reconnect create session ${sessionId}`
-        );
-      } catch (error: any) {
-        const message = error?.message ?? String(error);
-        const nextStatus = /auth/i.test(message) ? "auth_failed" : "disconnected";
-        console.error(`[routes][sessions][${sessionId}] reconnect failed:`, message);
-
-        await storage.updateSession(sessionId, {
-          status: nextStatus,
-        });
-
-        await storage.createSystemLog({
-          level: "error",
-          source: "whatsapp",
-          message: `Reconnect failed for session ${sessionId}`,
-          metadata: { sessionId, error: message },
-        });
-
-        return res.status(500).json({
-          error: "reconnect_failed",
-          message: "No se pudo reconectar la sesión",
-          details: message,
-          sessionId,
-        });
-      } finally {
-        sessionBusyLocks.delete(sessionId);
-      }
-
-      io.emit("session:reconnecting", { id: sessionId });
-      console.log(`[routes][sessions][${sessionId}] reconnect initiated`);
-
-      res.json({ message: "Reconnection initiated", sessionId });
+      res.status(result.httpStatus).json(result.body);
     } catch (error: any) {
       console.error(
         `[routes][sessions][${sessionId}] reconnect unexpected error:`,
@@ -2948,6 +3102,7 @@ export async function registerRoutes(
 
   return httpServer;
 }
+
 
 
 

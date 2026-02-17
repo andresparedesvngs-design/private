@@ -9,6 +9,7 @@ import { createServer } from "http";
 import { connectDatabase } from "./db";
 import { createAdminIfMissing, logAdminStatus, setupAuth } from "./auth";
 import { registerHealthRoute } from "./health";
+import { getPort, isProductionEnv } from "./env";
 
 initFileLogging();
 
@@ -160,17 +161,17 @@ app.use((req, res, next) => {
   // importantly only setup vite in development and after
   // setting up all the other routes so the catch-all route
   // doesn't interfere with the other routes
-  if (process.env.NODE_ENV === "production") {
+  if (isProductionEnv()) {
     serveStatic(app);
   } else {
     const { setupVite } = await import("./vite");
     await setupVite(httpServer, app);
   }
 
-  const port = parseInt(process.env.PORT || "5000", 10);
+  const port = getPort();
   const host =
     process.env.HOST ||
-    (process.env.NODE_ENV === "production" ? "0.0.0.0" : "localhost");
+    (isProductionEnv() ? "0.0.0.0" : "localhost");
 
   httpServer.listen(port, host, () => {
     log(`serving on ${host}:${port}`);
