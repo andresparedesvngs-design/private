@@ -208,6 +208,8 @@ export function setupAuth(app: Express): {
   )
     .trim()
     .toLowerCase();
+  const mongoSessionCollection =
+    (process.env.SESSION_COLLECTION ?? "app_sessions").trim() || "app_sessions";
 
   const resolveMongoSessionStore = () => {
     const mongoUrl = getMongoUri();
@@ -225,7 +227,7 @@ export function setupAuth(app: Express): {
       if (mongoose.connection.readyState === 1) {
         return MongoStore.create({
           client: mongoose.connection.getClient(),
-          collectionName: "sessions",
+          collectionName: mongoSessionCollection,
           ttl: ttlSeconds,
           autoRemove: "native",
         });
@@ -233,7 +235,7 @@ export function setupAuth(app: Express): {
 
       return MongoStore.create({
         mongoUrl,
-        collectionName: "sessions",
+        collectionName: mongoSessionCollection,
         ttl: ttlSeconds,
         autoRemove: "native",
       });

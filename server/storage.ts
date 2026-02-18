@@ -325,17 +325,32 @@ export class MongoStorage implements IStorage {
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
+  private getWhatsAppSessionFilter() {
+    return { status: { $exists: true } };
+  }
+
+  private isWhatsAppSessionDocument(session: any): boolean {
+    const obj = session?.toObject ? session.toObject() : session;
+    return Boolean(obj && Object.prototype.hasOwnProperty.call(obj, "status"));
+  }
+
   private async findSessionByAnyId(id: string): Promise<any | null> {
     const safeId = String(id ?? "").trim();
     if (!safeId) return null;
 
     if (mongoose.isValidObjectId(safeId)) {
-      const byObjectId = await SessionModel.findById(safeId);
+      const byObjectId = await SessionModel.findOne({
+        _id: safeId,
+        ...this.getWhatsAppSessionFilter(),
+      });
       if (byObjectId) return byObjectId;
     }
 
     // Legacy fallback for environments that may still have string _id documents.
-    const raw = await SessionModel.collection.findOne({ _id: safeId as any });
+    const raw = await SessionModel.collection.findOne({
+      _id: safeId as any,
+      ...this.getWhatsAppSessionFilter(),
+    });
     return raw ? SessionModel.hydrate(raw) : null;
   }
 
@@ -792,13 +807,18 @@ export class MongoStorage implements IStorage {
   }
 
   async getSessions(): Promise<Session[]> {
-    const sessions = await SessionModel.find().sort({ createdAt: -1 });
+    const sessions = await SessionModel.find(this.getWhatsAppSessionFilter()).sort({
+      createdAt: -1,
+    });
     return sessions.map(s => this.transformSession(s));
   }
 
   async getSession(id: string): Promise<Session | undefined> {
     const session = await this.findSessionByAnyId(id);
-    return session ? this.transformSession(session) : undefined;
+    if (!session || !this.isWhatsAppSessionDocument(session)) {
+      return undefined;
+    }
+    return this.transformSession(session);
   }
 
   async createSession(session: InsertSession): Promise<Session> {
@@ -822,12 +842,16 @@ export class MongoStorage implements IStorage {
     });
 
     if (mongoose.isValidObjectId(safeId)) {
-      const updated = await SessionModel.findByIdAndUpdate(safeId, cleanedData, { new: true });
+      const updated = await SessionModel.findOneAndUpdate(
+        { _id: safeId, ...this.getWhatsAppSessionFilter() },
+        cleanedData,
+        { new: true }
+      );
       if (updated) return this.transformSession(updated);
     }
 
     const legacyResult = await SessionModel.collection.findOneAndUpdate(
-      { _id: safeId as any },
+      { _id: safeId as any, ...this.getWhatsAppSessionFilter() },
       { $set: cleanedData },
       { returnDocument: "after" }
     );
@@ -841,11 +865,17 @@ export class MongoStorage implements IStorage {
     await PoolModel.updateMany({ sessionIds: safeId }, { $pull: { sessionIds: safeId } });
 
     if (mongoose.isValidObjectId(safeId)) {
-      const deleted = await SessionModel.findByIdAndDelete(safeId);
+      const deleted = await SessionModel.findOneAndDelete({
+        _id: safeId,
+        ...this.getWhatsAppSessionFilter(),
+      });
       if (deleted) return;
     }
 
-    await SessionModel.collection.deleteOne({ _id: safeId as any });
+    await SessionModel.collection.deleteOne({
+      _id: safeId as any,
+      ...this.getWhatsAppSessionFilter(),
+    });
   }
 
   async getProxyServers(): Promise<ProxyServer[]> {
@@ -1595,7 +1625,7 @@ export class MongoStorage implements IStorage {
 
   async getDashboardStats() {
     const [sessions, campaigns, debtors, sentCount] = await Promise.all([
-      SessionModel.find(),
+      SessionModel.find(this.getWhatsAppSessionFilter()),
       CampaignModel.find(),
       DebtorModel.find(),
       MessageModel.countDocuments({ status: "sent" }),
