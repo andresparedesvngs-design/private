@@ -19,6 +19,7 @@ import {
   useCreateSession,
   useDeleteSession,
   useReconnectSession,
+  useReconnectAllSessions,
   useResetSessionAuth,
   useEnableSessionQr,
   useVerifySessionsNow,
@@ -100,6 +101,7 @@ export default function Sessions() {
   const createSession = useCreateSession();
   const deleteSession = useDeleteSession();
   const reconnectSession = useReconnectSession();
+  const reconnectAllSessions = useReconnectAllSessions();
   const resetSessionAuth = useResetSessionAuth();
   const enableSessionQr = useEnableSessionQr();
   const verifySessionsNow = useVerifySessionsNow();
@@ -291,6 +293,34 @@ export default function Sessions() {
     } finally {
       setReconnectingId(null);
       setWaitingQrId(null);
+    }
+  };
+
+  const handleReconnectAll = async () => {
+    if (!sessions?.length) {
+      toast({
+        title: "Sin sesiones",
+        description: "No hay sesiones para reconectar.",
+      });
+      return;
+    }
+
+    try {
+      const result = await reconnectAllSessions.mutateAsync();
+      const hasFailures = result.failed > 0;
+      toast({
+        title: hasFailures
+          ? "Reconexión masiva completada con errores"
+          : "Reconexión masiva iniciada",
+        description: `Reconectadas ${result.reconnected}/${result.checked} · saltadas ${result.skipped} · fallidas ${result.failed}.`,
+        variant: hasFailures ? "destructive" : "default",
+      });
+    } catch (error) {
+      toast({
+        title: "No se pudo reconectar todo",
+        description: getErrorMessage(error, "Error en reconexión masiva."),
+        variant: "destructive",
+      });
     }
   };
 
@@ -618,6 +648,19 @@ export default function Sessions() {
                 )}
                 Validar sesiones
               </Button>
+              <Button
+                variant="outline"
+                className="gap-2"
+                onClick={handleReconnectAll}
+                disabled={reconnectAllSessions.isPending || !sessions?.length}
+              >
+                {reconnectAllSessions.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                Reconectar todas
+              </Button>
               <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
                 <DialogTrigger asChild>
                   <Button
@@ -858,7 +901,7 @@ export default function Sessions() {
                               {session.phoneNumber || "Pendiente..."}
                             </div>
                             <div className="text-xs text-muted-foreground font-mono">
-                              {session.id.slice(0, 12)}...
+                              {(session.id ?? "").slice(0, 12) || "sin-id"}...
                             </div>
                             <div className="text-xs text-muted-foreground">
                               Proxy: {proxyLabel} · {proxyStatus}
@@ -896,7 +939,7 @@ export default function Sessions() {
                           </div>
                         </div>
                         <div className="col-span-2 font-semibold">
-                          {session.messagesSent.toLocaleString()}
+                          {(session.messagesSent ?? 0).toLocaleString()}
                         </div>
                         <div className="col-span-2 text-xs text-muted-foreground">{lastActive}</div>
                         <div className="col-span-2 flex items-center justify-end gap-2">

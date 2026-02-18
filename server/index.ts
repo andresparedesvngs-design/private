@@ -150,6 +150,11 @@ app.use((req, res, next) => {
 
   await registerRoutes(httpServer, app, sessionMiddleware);
 
+  // Ensure unknown API routes always return JSON (never SPA HTML).
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ error: "API route not found" });
+  });
+
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";

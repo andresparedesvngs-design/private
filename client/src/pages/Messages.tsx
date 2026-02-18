@@ -41,6 +41,25 @@ import {
 import { getErrorMessage } from "@/lib/errors";
 import type { Contact, Debtor, Message } from "@shared/schema";
 
+const SUPERSEDE_FAILED_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+const normalizeMessageContent = (value?: string | null) =>
+  String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+
+const isIncomingMessage = (message: Message) =>
+  String(message.status ?? "").toLowerCase() === "received";
+
+const isFailedOutgoingMessage = (message: Message) =>
+  String(message.status ?? "").toLowerCase() === "failed" && !isIncomingMessage(message);
+
+const isSuccessfulOutgoingMessage = (message: Message) => {
+  const status = String(message.status ?? "").toLowerCase();
+  return (status === "sent" || status === "delivered" || status === "read") && !isIncomingMessage(message);
+};
+
 export default function Messages() {
   const MANUAL_SEND_SESSION_STORAGE_KEY = "messages:preferred-session-id";
   const { data: user } = useAuthMe();
@@ -419,7 +438,43 @@ export default function Messages() {
     if (!selectedConversation) return [];
     const sorted = [...selectedConversation.messages];
     sorted.sort((a, b) => getMessageTime(a) - getMessageTime(b));
-    return sorted;
+
+    const successfulBySignature = new Map<string, number[]>();
+    for (const message of sorted) {
+      if (!isSuccessfulOutgoingMessage(message)) {
+        continue;
+      }
+      const signature = [
+        normalizeConversationKey(message.phoneNormalized ?? message.phone ?? ""),
+        String(message.channel ?? "whatsapp").toLowerCase(),
+        normalizeMessageContent(message.content),
+      ].join("::");
+      const sentAt = getMessageTime(message);
+      const existing = successfulBySignature.get(signature) ?? [];
+      existing.push(sentAt);
+      successfulBySignature.set(signature, existing);
+    }
+
+    return sorted.filter((message) => {
+      if (!isFailedOutgoingMessage(message)) {
+        return true;
+      }
+
+      const signature = [
+        normalizeConversationKey(message.phoneNormalized ?? message.phone ?? ""),
+        String(message.channel ?? "whatsapp").toLowerCase(),
+        normalizeMessageContent(message.content),
+      ].join("::");
+      const failedAt = getMessageTime(message);
+      const successfulTimes = successfulBySignature.get(signature) ?? [];
+      const superseded = successfulTimes.some(
+        (successAt) =>
+          successAt > failedAt &&
+          successAt - failedAt <= SUPERSEDE_FAILED_WINDOW_MS
+      );
+
+      return !superseded;
+    });
   }, [selectedConversation]);
 
   const selectedDisplayName =
@@ -869,7 +924,7 @@ export default function Messages() {
                      <SelectItem value="all">Todas</SelectItem>
                      {sessions?.map((session) => (
                        <SelectItem key={session.id} value={session.id}>
-                         {session.phoneNumber?.slice(-6) || session.id.slice(0, 6)}
+                         {session.phoneNumber?.slice(-6) || (session.id ?? "").slice(0, 6) || "sin-id"}
                        </SelectItem>
                      ))}
                    </SelectContent>

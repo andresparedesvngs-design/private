@@ -893,14 +893,18 @@ export async function registerRoutes(
       if (!ensureRole(req, res, ["admin"])) {
         return;
       }
+      const existing = await storage.getSession(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: "Session not found" });
+      }
       // Don't block the HTTP response on whatsapp-web.js teardown, which can hang in some cases.
       // For deletions we also remove LocalAuth state so re-creating the session is a clean slate.
       void whatsappManager.destroySession(req.params.id, { removeAuth: true });
       await storage.deleteSession(req.params.id);
       
       io.emit('session:deleted', { id: req.params.id });
-      
-      res.status(204).send();
+
+      res.json({ success: true, id: req.params.id });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

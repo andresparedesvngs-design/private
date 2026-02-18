@@ -24,11 +24,24 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
     ...options,
   });
 
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-    const message = error?.message || error?.error || 'Request failed';
+    if (contentType.includes("application/json")) {
+      const error = await response.json().catch(() => ({ error: "Unknown error" }));
+      const message = error?.message || error?.error || "Request failed";
+      const err = new Error(message);
+      (err as any).response = { data: error };
+      throw err;
+    }
+
+    const raw = (await response.text().catch(() => "")).trim();
+    const isHtml = raw.startsWith("<!DOCTYPE") || raw.startsWith("<html");
+    const message = isHtml
+      ? "API devolvió HTML en lugar de JSON. Revisa proxy/ruta /api."
+      : raw || "Request failed";
     const err = new Error(message);
-    (err as any).response = { data: error };
+    (err as any).response = { data: { error: message, status: response.status } };
     throw err;
   }
 
@@ -36,7 +49,16 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
     return undefined as T;
   }
 
-  return response.json();
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+
+  const raw = (await response.text().catch(() => "")).trim();
+  if (!raw) {
+    return undefined as T;
+  }
+
+  throw new Error("API devolvió contenido no JSON en una respuesta exitosa.");
 }
 
 export type AuthMe = {
@@ -99,6 +121,21 @@ export type VerifyNowResult = {
     phoneNumber: string | null;
     verifiedConnected: boolean;
     error?: string;
+  }>;
+};
+
+export type ReconnectAllSessionsResult = {
+  checked: number;
+  attempted: number;
+  reconnected: number;
+  skipped: number;
+  failed: number;
+  results: Array<{
+    sessionId: string;
+    status: "reconnected" | "skipped" | "failed";
+    reason: string;
+    message: string | null;
+    details: string | null;
   }>;
 };
 
@@ -478,7 +515,7 @@ export function useDeleteSession() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: (id: string) => fetchApi<void>(`/sessions/${id}`, {
+    mutationFn: (id: string) => fetchApi<{ success: boolean; id: string }>(`/sessions/${id}`, {
       method: 'DELETE',
     }),
     onSuccess: () => {
@@ -528,6 +565,22 @@ export function useReconnectSession() {
     }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['sessions'] });
+    },
+  });
+}
+
+export function useReconnectAllSessions() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: () =>
+      fetchApi<ReconnectAllSessionsResult>("/sessions/reconnect-all", {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["sessions", "health"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
 }
