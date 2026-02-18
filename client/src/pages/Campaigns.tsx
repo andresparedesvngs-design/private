@@ -2861,7 +2861,7 @@ export default function Campaigns() {
                               className="cursor-pointer"
                               onClick={() => toggleSessionInPool(session.id)}
                             >
-                              {session.phoneNumber || session.id.slice(0, 8)}
+                              {session.phoneNumber || (session.id ?? "").slice(0, 8) || "sin-id"}
                             </Badge>
                           ))}
                           {!sessions?.filter(s => s.status === 'connected').length && (
@@ -3327,7 +3327,7 @@ export default function Campaigns() {
                               className="cursor-pointer"
                               onClick={() => toggleSessionInPool(session.id)}
                             >
-                              {session.phoneNumber || session.id.slice(0, 8)}
+                              {session.phoneNumber || (session.id ?? "").slice(0, 8) || "sin-id"}
                             </Badge>
                           ))}
                           {!sessions?.filter(s => s.status === 'connected').length && (
@@ -3419,7 +3419,7 @@ export default function Campaigns() {
                            const session = sessions?.find(s => s.id === sid);
                            return (
                              <Badge key={sid} variant="outline" className="bg-background">
-                               {session?.phoneNumber || sid.slice(0,8)}
+                               {session?.phoneNumber || (sid ?? "").slice(0, 8) || "sin-id"}
                              </Badge>
                            );
                          })}
@@ -3549,7 +3549,7 @@ export default function Campaigns() {
                            const line = gsmLines?.find((l) => l.id === lineId);
                            return (
                              <Badge key={lineId} variant="outline" className="bg-background">
-                               {line?.name || lineId.slice(0, 8)}
+                               {line?.name || (lineId ?? "").slice(0, 8) || "sin-id"}
                              </Badge>
                            );
                          })}

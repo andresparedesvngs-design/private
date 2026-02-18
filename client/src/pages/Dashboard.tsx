@@ -316,8 +316,8 @@ export default function Dashboard() {
           <CardContent>
             <ScrollArea className="h-[200px]">
               <div className="space-y-4">
-                {sessions?.map((session) => (
-                  <div key={session.id} className="flex items-center justify-between p-3 rounded-lg border bg-card/50 hover:bg-secondary/50 transition-colors">
+                {sessions?.map((session, index) => (
+                  <div key={session.id ?? `session-${index}`} className="flex items-center justify-between p-3 rounded-lg border bg-card/50 hover:bg-secondary/50 transition-colors">
                     <div className="flex items-center gap-4">
                       <div className={`
                         h-10 w-10 rounded-full flex items-center justify-center
@@ -329,7 +329,7 @@ export default function Dashboard() {
                       <div>
                         <p className="font-medium text-sm">{session.phoneNumber || 'Pendiente...'}</p>
                         <p className="text-xs text-muted-foreground flex items-center gap-1">
-                          ID: {session.id.slice(0, 8)}
+                          ID: {(session.id ?? "").slice(0, 8) || `session-${index}`}
                           {session.battery && <span>• {session.battery}% batería</span>}
                         </p>
                       </div>
@@ -337,7 +337,7 @@ export default function Dashboard() {
                     
                     <div className="flex items-center gap-4">
                       <div className="text-right hidden sm:block">
-                        <p className="text-sm font-medium">{session.messagesSent.toLocaleString()} enviados</p>
+                        <p className="text-sm font-medium">{(session.messagesSent ?? 0).toLocaleString()} enviados</p>
                         <p className="text-xs text-muted-foreground">
                           {session.lastActive ? `Última actividad: ${new Date(session.lastActive).toLocaleTimeString()}` : 'Nunca'}
                         </p>

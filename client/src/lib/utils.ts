@@ -17,9 +17,10 @@ export function isValidObjectId(id: string): boolean {
  * Formatea un ObjectId para mostrarlo de manera abreviada
  * Útil para mostrar IDs en la UI
  */
-export function formatObjectId(id: string, length: number = 8): string {
-  if (!isValidObjectId(id)) {
-    return id.slice(0, length);
+export function formatObjectId(id?: string | null, length: number = 8): string {
+  const safeId = String(id ?? "");
+  if (!isValidObjectId(safeId)) {
+    return safeId.slice(0, length);
   }
-  return id.slice(0, length);
+  return safeId.slice(0, length);
 }

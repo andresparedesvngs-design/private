@@ -320,19 +320,27 @@ export class MongoStorage implements IStorage {
     return updated ?? existing;
   }
 
+  private toSafeNumber(value: unknown, fallback = 0): number {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
   // MÃ©todos de transformaciÃ³n
   private transformSession(session: any): Session {
     if (!session) return session;
     const obj = session.toObject ? session.toObject() : session;
     return {
-      id: obj._id ? obj._id.toString() : obj.id,
-      phoneNumber: obj.phoneNumber,
-      status: obj.status,
-      qrCode: obj.qrCode,
-      battery: obj.battery,
-      messagesSent: obj.messagesSent,
+      id: obj._id ? obj._id.toString() : String(obj.id ?? ""),
+      phoneNumber: obj.phoneNumber ?? null,
+      status: obj.status ?? "disconnected",
+      qrCode: obj.qrCode ?? null,
+      battery:
+        obj.battery === null || obj.battery === undefined
+          ? null
+          : this.toSafeNumber(obj.battery, 0),
+      messagesSent: this.toSafeNumber(obj.messagesSent, 0),
       lastActive: obj.lastActive,
-      purpose: obj.purpose,
+      purpose: obj.purpose ?? "default",
       proxyServerId: obj.proxyServerId ? obj.proxyServerId.toString() : obj.proxyServerId,
       proxyLocked: obj.proxyLocked ?? true,
       authClientId: obj.authClientId ?? null,
@@ -444,24 +452,24 @@ export class MongoStorage implements IStorage {
     if (!campaign) return campaign;
     const obj = campaign.toObject ? campaign.toObject() : campaign;
     return {
-      id: obj._id ? obj._id.toString() : obj.id,
+      id: obj._id ? obj._id.toString() : String(obj.id ?? ""),
       name: obj.name,
       message: obj.message,
       messageVariants: obj.messageVariants,
       messageRotationStrategy: obj.messageRotationStrategy,
       channel: obj.channel,
       smsPoolId: obj.smsPoolId ? obj.smsPoolId.toString() : obj.smsPoolId,
-      fallbackSms: obj.fallbackSms,
-      status: obj.status,
+      fallbackSms: obj.fallbackSms ?? false,
+      status: obj.status ?? "draft",
       pausedReason: obj.pausedReason ?? null,
       poolId: obj.poolId ? obj.poolId.toString() : obj.poolId,
       debtorRangeStart: obj.debtorRangeStart,
       debtorRangeEnd: obj.debtorRangeEnd,
-      totalDebtors: obj.totalDebtors,
-      sent: obj.sent,
-      delivered: obj.delivered,
-      failed: obj.failed,
-      progress: obj.progress,
+      totalDebtors: this.toSafeNumber(obj.totalDebtors, 0),
+      sent: this.toSafeNumber(obj.sent, 0),
+      delivered: this.toSafeNumber(obj.delivered, 0),
+      failed: this.toSafeNumber(obj.failed, 0),
+      progress: this.toSafeNumber(obj.progress, 0),
       ownerUserId: obj.ownerUserId ? obj.ownerUserId.toString() : obj.ownerUserId,
       createdAt: obj.createdAt,
       updatedAt: obj.updatedAt,
@@ -474,12 +482,12 @@ export class MongoStorage implements IStorage {
     if (!debtor) return debtor;
     const obj = debtor.toObject ? debtor.toObject() : debtor;
     return {
-      id: obj._id ? obj._id.toString() : obj.id,
+      id: obj._id ? obj._id.toString() : String(obj.id ?? ""),
       campaignId: obj.campaignId ? obj.campaignId.toString() : obj.campaignId,
       name: obj.name,
       phone: obj.phone,
-      debt: obj.debt,
-      status: obj.status,
+      debt: this.toSafeNumber(obj.debt, 0),
+      status: obj.status ?? "disponible",
       lastContact: obj.lastContact,
       metadata: obj.metadata,
       ownerUserId: obj.ownerUserId ? obj.ownerUserId.toString() : obj.ownerUserId,
