@@ -325,6 +325,20 @@ export class MongoStorage implements IStorage {
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
+  private async findSessionByAnyId(id: string): Promise<any | null> {
+    const safeId = String(id ?? "").trim();
+    if (!safeId) return null;
+
+    if (mongoose.isValidObjectId(safeId)) {
+      const byObjectId = await SessionModel.findById(safeId);
+      if (byObjectId) return byObjectId;
+    }
+
+    // Legacy fallback for environments that may still have string _id documents.
+    const raw = await SessionModel.collection.findOne({ _id: safeId as any });
+    return raw ? SessionModel.hydrate(raw) : null;
+  }
+
   // MÃ©todos de transformaciÃ³n
   private transformSession(session: any): Session {
     if (!session) return session;
@@ -783,8 +797,7 @@ export class MongoStorage implements IStorage {
   }
 
   async getSession(id: string): Promise<Session | undefined> {
-    if (!mongoose.isValidObjectId(id)) return undefined;
-    const session = await SessionModel.findById(id);
+    const session = await this.findSessionByAnyId(id);
     return session ? this.transformSession(session) : undefined;
   }
 
@@ -799,23 +812,40 @@ export class MongoStorage implements IStorage {
   }
 
   async updateSession(id: string, data: Partial<InsertSession>): Promise<Session | undefined> {
-    if (!mongoose.isValidObjectId(id)) return undefined;
+    const safeId = String(id ?? "").trim();
+    if (!safeId) return undefined;
     const cleanedData: any = { ...data };
     Object.keys(cleanedData).forEach(key => {
       if (cleanedData[key] === undefined) {
         delete cleanedData[key];
       }
     });
-    const updated = await SessionModel.findByIdAndUpdate(id, cleanedData, { new: true });
-    return updated ? this.transformSession(updated) : undefined;
+
+    if (mongoose.isValidObjectId(safeId)) {
+      const updated = await SessionModel.findByIdAndUpdate(safeId, cleanedData, { new: true });
+      if (updated) return this.transformSession(updated);
+    }
+
+    const legacyResult = await SessionModel.collection.findOneAndUpdate(
+      { _id: safeId as any },
+      { $set: cleanedData },
+      { returnDocument: "after" }
+    );
+    return legacyResult ? this.transformSession(legacyResult) : undefined;
   }
 
   async deleteSession(id: string): Promise<void> {
-    // Session IDs are ObjectIds in Mongo; also clean up references in pools (stored as strings).
-    if (!mongoose.isValidObjectId(id)) return;
+    const safeId = String(id ?? "").trim();
+    if (!safeId) return;
 
-    await PoolModel.updateMany({ sessionIds: id }, { $pull: { sessionIds: id } });
-    await SessionModel.findByIdAndDelete(id);
+    await PoolModel.updateMany({ sessionIds: safeId }, { $pull: { sessionIds: safeId } });
+
+    if (mongoose.isValidObjectId(safeId)) {
+      const deleted = await SessionModel.findByIdAndDelete(safeId);
+      if (deleted) return;
+    }
+
+    await SessionModel.collection.deleteOne({ _id: safeId as any });
   }
 
   async getProxyServers(): Promise<ProxyServer[]> {
