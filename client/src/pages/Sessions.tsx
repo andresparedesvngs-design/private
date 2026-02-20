@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -1017,7 +1018,7 @@ export default function Sessions() {
           }
         }}
       >
-        <DialogContent className="w-full max-w-[min(92vw,720px)] overflow-x-hidden box-border">
+        <DialogContent className="w-full max-w-[min(92vw,720px)] overflow-hidden box-border">
           <DialogHeader>
             <DialogTitle>Detalle de sesión</DialogTitle>
             <DialogDescription>
@@ -1029,211 +1030,246 @@ export default function Sessions() {
               Selecciona una sesión para ver detalles.
             </div>
           ) : (
-            <div className="space-y-4">
-              <div className="rounded-md border p-3 space-y-1 break-words whitespace-normal [overflow-wrap:anywhere]">
-                <div className="text-sm font-medium">Sesión</div>
-                <div className="text-xs text-muted-foreground">
-                  {detailsSession.phoneNumber || "Pendiente"} · {detailsSession.status}
-                </div>
-                <div className="text-xs font-mono break-words whitespace-normal [overflow-wrap:anywhere]">
-                  {detailsSession.id}
-                </div>
-                {detailsSession.purpose === "notify" && (
-                  <Badge variant="outline" className="mt-2 text-xs">
-                    Notificaciones
-                  </Badge>
-                )}
-              </div>
+            <Tabs defaultValue="overview" className="mt-2">
+              <TabsList className="grid h-auto w-full grid-cols-3">
+                <TabsTrigger value="overview">Resumen</TabsTrigger>
+                <TabsTrigger value="metrics">Métricas</TabsTrigger>
+                <TabsTrigger value="proxy">Proxy</TabsTrigger>
+              </TabsList>
 
-              <div className="rounded-md border p-3 space-y-2">
-                <div className="text-sm font-medium">Métricas</div>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div>Mensajes enviados: {detailsSession.messagesSent ?? 0}</div>
-                  <div>Disconnects: {detailsSession.disconnectCount ?? 0}</div>
-                  <div>Auth failures: {detailsSession.authFailureCount ?? 0}</div>
-                  <div>Reset auth: {detailsSession.resetAuthCount ?? 0}</div>
-                  <div>Reconnects: {detailsSession.reconnectCount ?? 0}</div>
-                  <div>Último disconnect: {formatDateTime(detailsSession.lastDisconnectAt)}</div>
-                </div>
-                <div className="pt-2 border-t">
-                  <div className="text-sm font-medium">Salud de sesión</div>
-                  <div className="grid grid-cols-2 gap-2 text-xs mt-1">
-                    <div>Estado: {displayHealth(detailsSession.healthStatus)}</div>
-                    <div>Score: {detailsSession.healthScore ?? 0}</div>
-                    <div>Strikes: {detailsSession.strikeCount ?? 0}</div>
-                    <div>Cooldown: {formatDateTime(detailsSession.cooldownUntil)}</div>
-                    <div className="col-span-2">
-                      Motivo: {detailsSession.healthReason ?? "-"}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="pt-2 border-t">
-                  <div className="text-sm font-medium">Límites de envío</div>
-                  <div className="grid grid-cols-2 gap-2 text-xs mt-1">
-                    <div>
-                      Tokens/min: {detailsSession.sendLimits?.tokensPerMinute ?? 6}
-                    </div>
-                    <div>Burst: {detailsSession.sendLimits?.bucketSize ?? 10}</div>
-                    <div>Máx hora: {detailsSession.sendLimits?.hourlyMax ?? 60}</div>
-                    <div>Máx día: {detailsSession.sendLimits?.dailyMax ?? 200}</div>
-                    <div>
-                      Contador hora: {detailsSession.countersWindow?.hourCount ?? 0}
-                    </div>
-                    <div>
-                      Desde: {formatDateTime(detailsSession.countersWindow?.hourStart ?? null)}
-                    </div>
-                    <div>
-                      Contador día: {detailsSession.countersWindow?.dayCount ?? 0}
-                    </div>
-                    <div>
-                      Desde: {formatDateTime(detailsSession.countersWindow?.dayStart ?? null)}
-                    </div>
-                    <div className="col-span-2">
-                      Último ajuste: {formatDateTime(detailsSession.lastLimitUpdateAt)}
-                    </div>
-                    <div className="col-span-2">
-                      Motivo ajuste: {detailsSession.limitChangeReason ?? "-"}
-                    </div>
-                  </div>
-                  <div className="mt-3 flex items-center justify-end gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handleRecomputeLimits(detailsSession.id)}
-                      disabled={detailsSessionBusy}
-                    >
-                      Recalcular límites
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-md border p-3 space-y-1 break-words whitespace-normal [overflow-wrap:anywhere]">
-                <div className="text-sm font-medium">Proxy asignado</div>
-                <div className="text-xs text-muted-foreground">
-                  {detailsProxy ? detailsProxy.name : "Sin proxy"}
-                </div>
-                <div className="text-xs font-mono break-words whitespace-normal [overflow-wrap:anywhere]">
-                  {detailsProxyEndpoint ?? "-"}
-                </div>
-                <div className="text-xs">
-                  Estado: {detailsProxyStatus}
-                  {detailsProxyIp ? ` · ${detailsProxyIp}` : ""}
-                  {detailsProxyLatency ? ` · ${detailsProxyLatency}ms` : ""}
-                </div>
-                {detailsProxyStatus === "degraded" && (
-                  <div className="text-xs text-amber-600">Proxy degradado</div>
-                )}
-                {detailsProxyStatus === "offline" && (
-                  <div className="text-xs text-red-600">Proxy offline</div>
-                )}
-              </div>
-
-              {canDeleteSessions && (
-                <div className="flex items-center justify-between rounded-md border p-3">
-                  <div>
-                    <div className="text-sm font-medium">Bloqueo de proxy</div>
+              <div className="mt-2 max-h-[70vh] overflow-y-auto pr-1">
+                <TabsContent value="overview" className="space-y-4">
+                  <div className="rounded-md border p-3 space-y-1 break-words whitespace-normal [overflow-wrap:anywhere]">
+                    <div className="text-sm font-medium">Sesión</div>
                     <div className="text-xs text-muted-foreground">
-                      Evita cambios accidentales.
+                      {detailsSession.phoneNumber || "Pendiente"} · {detailsSession.status}
                     </div>
+                    <div className="text-xs font-mono break-words whitespace-normal [overflow-wrap:anywhere]">
+                      {detailsSession.id}
+                    </div>
+                    {detailsSession.purpose === "notify" && (
+                      <Badge variant="outline" className="mt-2 text-xs">
+                        Notificaciones
+                      </Badge>
+                    )}
                   </div>
-                  <Switch
-                    checked={proxyLocked}
-                    onCheckedChange={(checked) =>
-                      handleToggleProxyLock(detailsSession, checked)
-                    }
-                    disabled={detailsSessionBusy}
-                  />
-                </div>
-              )}
 
-              <div className="rounded-md border p-3 space-y-3">
-                <div className="text-sm font-medium">Cambiar proxy</div>
-                <div className="space-y-2">
-                  <Label>Proxy destino</Label>
-                  <Select
-                    value={detailsTargetProxyId}
-                    onValueChange={setDetailsTargetProxyId}
-                    disabled={detailsSessionBusy}
-                  >
-                    <SelectTrigger className="w-full min-w-0">
-                      <SelectValue placeholder="Selecciona proxy" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={NO_PROXY_VALUE}>Sin proxy (directo)</SelectItem>
-                      {proxyList.map((proxy) => (
-                        <SelectItem
-                          key={proxy.id}
-                          value={proxy.id}
-                          disabled={!proxy.enabled || proxy.status === "offline"}
+                  <div className="rounded-md border p-3 space-y-1 break-words whitespace-normal [overflow-wrap:anywhere]">
+                    <div className="text-sm font-medium">Proxy asignado</div>
+                    <div className="text-xs text-muted-foreground">
+                      {detailsProxy ? detailsProxy.name : "Sin proxy"}
+                    </div>
+                    <div className="text-xs font-mono break-words whitespace-normal [overflow-wrap:anywhere]">
+                      {detailsProxyEndpoint ?? "-"}
+                    </div>
+                    <div className="text-xs">
+                      Estado: {detailsProxyStatus}
+                      {detailsProxyIp ? ` · ${detailsProxyIp}` : ""}
+                      {detailsProxyLatency ? ` · ${detailsProxyLatency}ms` : ""}
+                    </div>
+                    {detailsProxyStatus === "degraded" && (
+                      <div className="text-xs text-amber-600">Proxy degradado</div>
+                    )}
+                    {detailsProxyStatus === "offline" && (
+                      <div className="text-xs text-red-600">Proxy offline</div>
+                    )}
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="metrics" className="space-y-4">
+                  <div className="rounded-md border p-3 space-y-2">
+                    <div className="text-sm font-medium">Métricas</div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div>Mensajes enviados: {detailsSession.messagesSent ?? 0}</div>
+                      <div>Disconnects: {detailsSession.disconnectCount ?? 0}</div>
+                      <div>Auth failures: {detailsSession.authFailureCount ?? 0}</div>
+                      <div>Reset auth: {detailsSession.resetAuthCount ?? 0}</div>
+                      <div>Reconnects: {detailsSession.reconnectCount ?? 0}</div>
+                      <div>Último disconnect: {formatDateTime(detailsSession.lastDisconnectAt)}</div>
+                    </div>
+                    <div className="pt-2 border-t">
+                      <div className="text-sm font-medium">Salud de sesión</div>
+                      <div className="grid grid-cols-2 gap-2 text-xs mt-1">
+                        <div>Estado: {displayHealth(detailsSession.healthStatus)}</div>
+                        <div>Score: {detailsSession.healthScore ?? 0}</div>
+                        <div>Strikes: {detailsSession.strikeCount ?? 0}</div>
+                        <div>Cooldown: {formatDateTime(detailsSession.cooldownUntil)}</div>
+                        <div className="col-span-2">
+                          Motivo: {detailsSession.healthReason ?? "-"}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t">
+                      <div className="text-sm font-medium">Límites de envío</div>
+                      <div className="grid grid-cols-2 gap-2 text-xs mt-1">
+                        <div>
+                          Tokens/min: {detailsSession.sendLimits?.tokensPerMinute ?? 6}
+                        </div>
+                        <div>Burst: {detailsSession.sendLimits?.bucketSize ?? 10}</div>
+                        <div>Máx hora: {detailsSession.sendLimits?.hourlyMax ?? 60}</div>
+                        <div>Máx día: {detailsSession.sendLimits?.dailyMax ?? 200}</div>
+                        <div>
+                          Contador hora: {detailsSession.countersWindow?.hourCount ?? 0}
+                        </div>
+                        <div>
+                          Desde: {formatDateTime(detailsSession.countersWindow?.hourStart ?? null)}
+                        </div>
+                        <div>
+                          Contador día: {detailsSession.countersWindow?.dayCount ?? 0}
+                        </div>
+                        <div>
+                          Desde: {formatDateTime(detailsSession.countersWindow?.dayStart ?? null)}
+                        </div>
+                        <div className="col-span-2">
+                          Último ajuste: {formatDateTime(detailsSession.lastLimitUpdateAt)}
+                        </div>
+                        <div className="col-span-2">
+                          Motivo ajuste: {detailsSession.limitChangeReason ?? "-"}
+                        </div>
+                      </div>
+                      <div className="mt-3 flex items-center justify-end gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleRecomputeLimits(detailsSession.id)}
+                          disabled={detailsSessionBusy}
                         >
-                          <span className="block break-words whitespace-normal [overflow-wrap:anywhere]">
-                            {proxy.name} — {proxy.scheme}://{proxy.host}:{proxy.port} — {proxy.status}
-                            {proxy.lastPublicIp ? ` — ${proxy.lastPublicIp}` : ""}
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {targetIsNoProxySelection && (
+                          Recalcular límites
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="proxy" className="space-y-4">
+                  <div className="rounded-md border p-3 space-y-1 break-words whitespace-normal [overflow-wrap:anywhere]">
+                    <div className="text-sm font-medium">Proxy asignado</div>
                     <div className="text-xs text-muted-foreground">
-                      La sesión quedará sin proxy asignado.
+                      {detailsProxy ? detailsProxy.name : "Sin proxy"}
+                    </div>
+                    <div className="text-xs font-mono break-words whitespace-normal [overflow-wrap:anywhere]">
+                      {detailsProxyEndpoint ?? "-"}
+                    </div>
+                    <div className="text-xs">
+                      Estado: {detailsProxyStatus}
+                      {detailsProxyIp ? ` · ${detailsProxyIp}` : ""}
+                      {detailsProxyLatency ? ` · ${detailsProxyLatency}ms` : ""}
+                    </div>
+                    {detailsProxyStatus === "degraded" && (
+                      <div className="text-xs text-amber-600">Proxy degradado</div>
+                    )}
+                    {detailsProxyStatus === "offline" && (
+                      <div className="text-xs text-red-600">Proxy offline</div>
+                    )}
+                  </div>
+
+                  {canDeleteSessions && (
+                    <div className="flex items-center justify-between rounded-md border p-3">
+                      <div>
+                        <div className="text-sm font-medium">Bloqueo de proxy</div>
+                        <div className="text-xs text-muted-foreground">
+                          Evita cambios accidentales.
+                        </div>
+                      </div>
+                      <Switch
+                        checked={proxyLocked}
+                        onCheckedChange={(checked) =>
+                          handleToggleProxyLock(detailsSession, checked)
+                        }
+                        disabled={detailsSessionBusy}
+                      />
                     </div>
                   )}
-                  {targetProxyInvalid && detailsTargetProxyId && (
-                    <div className="text-xs text-amber-600">
-                      Proxy destino no disponible.
+
+                  <div className="rounded-md border p-3 space-y-3">
+                    <div className="text-sm font-medium">Cambiar proxy</div>
+                    <div className="space-y-2">
+                      <Label>Proxy destino</Label>
+                      <Select
+                        value={detailsTargetProxyId}
+                        onValueChange={setDetailsTargetProxyId}
+                        disabled={detailsSessionBusy}
+                      >
+                        <SelectTrigger className="w-full min-w-0">
+                          <SelectValue placeholder="Selecciona proxy" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NO_PROXY_VALUE}>Sin proxy (directo)</SelectItem>
+                          {proxyList.map((proxy) => (
+                            <SelectItem
+                              key={proxy.id}
+                              value={proxy.id}
+                              disabled={!proxy.enabled || proxy.status === "offline"}
+                            >
+                              <span className="block break-words whitespace-normal [overflow-wrap:anywhere]">
+                                {proxy.name} — {proxy.scheme}://{proxy.host}:{proxy.port} — {proxy.status}
+                                {proxy.lastPublicIp ? ` — ${proxy.lastPublicIp}` : ""}
+                              </span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {targetIsNoProxySelection && (
+                        <div className="text-xs text-muted-foreground">
+                          La sesión quedará sin proxy asignado.
+                        </div>
+                      )}
+                      {targetProxyInvalid && detailsTargetProxyId && (
+                        <div className="text-xs text-amber-600">
+                          Proxy destino no disponible.
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
 
-                {!sessionStopped && (
-                  <div className="text-xs text-muted-foreground">
-                    Detén la sesión para permitir cambios.
-                  </div>
-                )}
-                {requiresCurrentProxyBad && !currentProxyBad && (
-                  <div className="text-xs text-muted-foreground">
-                    El proxy actual debe estar degraded u offline.
-                  </div>
-                )}
-                {proxyLocked && (
-                  <div className="text-xs text-muted-foreground">
-                    El proxy está bloqueado. Desbloquéalo para cambiar.
-                  </div>
-                )}
+                    {!sessionStopped && (
+                      <div className="text-xs text-muted-foreground">
+                        Detén la sesión para permitir cambios.
+                      </div>
+                    )}
+                    {requiresCurrentProxyBad && !currentProxyBad && (
+                      <div className="text-xs text-muted-foreground">
+                        El proxy actual debe estar degraded u offline.
+                      </div>
+                    )}
+                    {proxyLocked && (
+                      <div className="text-xs text-muted-foreground">
+                        El proxy está bloqueado. Desbloquéalo para cambiar.
+                      </div>
+                    )}
 
-                <div className="flex items-center justify-between gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => handleStopSession(detailsSession)}
-                    disabled={sessionStopped || detailsSessionBusy}
-                  >
-                    {detailsSessionBusy ? (
-                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                    ) : null}
-                    Stop & Change
-                  </Button>
-                  <Button
-                    onClick={() => handleChangeProxy(detailsSession)}
-                    disabled={
-                      detailsSessionBusy ||
-                      !canAttemptProxyChange ||
-                      proxyLocked ||
-                      (requiresCurrentProxyBad && !currentProxyBad) ||
-                      targetProxyInvalid ||
-                      updateSession.isPending
-                    }
-                  >
-                    {updateSession.isPending || detailsSessionBusy ? (
-                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                    ) : null}
-                    Cambiar proxy
-                  </Button>
-                </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => handleStopSession(detailsSession)}
+                        disabled={sessionStopped || detailsSessionBusy}
+                      >
+                        {detailsSessionBusy ? (
+                          <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                        ) : null}
+                        Stop & Change
+                      </Button>
+                      <Button
+                        onClick={() => handleChangeProxy(detailsSession)}
+                        disabled={
+                          detailsSessionBusy ||
+                          !canAttemptProxyChange ||
+                          proxyLocked ||
+                          (requiresCurrentProxyBad && !currentProxyBad) ||
+                          targetProxyInvalid ||
+                          updateSession.isPending
+                        }
+                      >
+                        {updateSession.isPending || detailsSessionBusy ? (
+                          <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                        ) : null}
+                        Cambiar proxy
+                      </Button>
+                    </div>
+                  </div>
+                </TabsContent>
               </div>
-            </div>
+            </Tabs>
           )}
         </DialogContent>
       </Dialog>
