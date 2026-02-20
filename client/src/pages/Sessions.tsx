@@ -38,6 +38,12 @@ import { getErrorMessage } from "@/lib/errors";
 const NO_PROXY_VALUE = "__NO_PROXY__";
 const QR_WAIT_TIMEOUT_MS = 45000;
 const QR_POLL_INTERVAL_MS = 1500;
+const PENDING_SESSION_STATUSES = new Set([
+  "initializing",
+  "qr_ready",
+  "authenticated",
+  "reconnecting",
+]);
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -96,7 +102,7 @@ export default function Sessions() {
   const [detailsSessionId, setDetailsSessionId] = useState<string | null>(null);
   const [detailsTargetProxyId, setDetailsTargetProxyId] = useState<string>(NO_PROXY_VALUE);
   const [detailsProxyLocked, setDetailsProxyLocked] = useState(true);
-  const { data: sessions, isLoading } = useSessions(canManageSessions);
+  const { data: sessions, isLoading, refetch: refetchSessions } = useSessions(canManageSessions);
   const { data: proxies } = useProxyServers(canManageSessions);
   const sessionsHealth = useSessionsHealth(false);
   const createSession = useCreateSession();
@@ -228,9 +234,34 @@ export default function Sessions() {
       setIsQRModalOpen(true);
       setIsCreateOpen(false);
     } catch (error) {
+      const message = getErrorMessage(error, "Error creando sesión.");
+      const looksLikeHtmlFallback =
+        /API devolvi[oó] HTML en lugar de JSON/i.test(message);
+
+      if (looksLikeHtmlFallback) {
+        try {
+          const refreshed = await refetchSessions();
+          const maybeCreated = (refreshed.data ?? []).find((session) =>
+            PENDING_SESSION_STATUSES.has(session.status)
+          );
+          if (maybeCreated) {
+            openQrModalForSession(maybeCreated.id, "create");
+            setIsCreateOpen(false);
+            toast({
+              title: "Sesión detectada",
+              description:
+                "La respuesta fue inestable, pero la sesión se creó. Abriendo QR.",
+            });
+            return;
+          }
+        } catch {
+          // Ignore and fall through to default error toast.
+        }
+      }
+
       toast({
         title: "No se pudo crear la sesión",
-        description: getErrorMessage(error, "Error creando sesión."),
+        description: message,
         variant: "destructive",
       });
     }
@@ -472,10 +503,7 @@ export default function Sessions() {
       });
   };
 
-  const pendingStatuses = useMemo(
-    () => new Set(["initializing", "qr_ready", "authenticated", "reconnecting"]),
-    []
-  );
+  const pendingStatuses = PENDING_SESSION_STATUSES;
 
   const sessionList = useMemo(() => {
     if (!sessions) return sessions;
