@@ -2,6 +2,9 @@
 
 Ruta del proyecto objetivo: `/var/www/paredes_devs/WHS`
 
+Si tu servidor es Red Hat / AlmaLinux / Rocky, usa la guia especifica:
+`DEPLOY_BETA_RC_RHEL.md`
+
 ## 0) Quickstart post-clone (recomendado)
 
 ```bash
