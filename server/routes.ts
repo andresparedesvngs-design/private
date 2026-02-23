@@ -2,7 +2,11 @@ import type { Express, RequestHandler } from "express";
 import { type Server } from "http";
 import { Server as SocketServer } from "socket.io";
 import { storage } from "./storage";
-import { whatsappManager, WhatsAppSendPolicyError } from "./whatsappManager";
+import {
+  whatsappManager,
+  WhatsAppSendPolicyError,
+  WhatsAppSessionNotReadyError,
+} from "./whatsappManager";
 import { campaignEngine } from "./campaignEngine";
 import { proxyMonitor } from "./proxyMonitor";
 import { bindAuthToSocket, type AuthUser } from "./auth";
@@ -2974,6 +2978,14 @@ export async function registerRoutes(
         if (error.code === "blocked") {
           return res.status(409).json({ error: "blocked", sessionId: req.params.id });
         }
+      }
+      if (error instanceof WhatsAppSessionNotReadyError) {
+        return res.status(503).json({
+          error: "SESSION_NOT_READY",
+          message: error.message,
+          sessionId: req.params.id,
+          details: error.details ?? null,
+        });
       }
 
       res.status(500).json({ error: error.message });

@@ -96,6 +96,17 @@ export class WhatsAppSendPolicyError extends Error {
   }
 }
 
+export class WhatsAppSessionNotReadyError extends Error {
+  readonly code = "SESSION_NOT_READY";
+  readonly details?: Record<string, unknown>;
+
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message);
+    this.name = "WhatsAppSessionNotReadyError";
+    this.details = details;
+  }
+}
+
 const clientAny = Client as any;
 if (!clientAny.__injectPatched) {
   const originalInject = clientAny.prototype?.inject;
@@ -162,6 +173,9 @@ class WhatsAppManager {
   private pollingEnabledOverride: boolean | null = null;
   private pollingIntervalOverrideMs: number | null = null;
   private qrWindowUntil: Map<string, number> = new Map();
+  private reconnectInFlight: Map<string, Promise<void>> = new Map();
+  private reconnectCooldownUntil: Map<string, number> = new Map();
+  private proxyMarkCooldownUntil: Map<string, number> = new Map();
   private readonly authDataPath = resolveWwebjsAuthDir();
 
   private ensureAuthDataPath(): void {
@@ -620,6 +634,337 @@ class WhatsAppManager {
       return 30000;
     }
     return Math.floor(envValue);
+  }
+
+  private getSendReconnectCooldownMs(): number {
+    const envValue = Number(process.env.WHATSAPP_SEND_RECONNECT_COOLDOWN_MS ?? "30000");
+    if (!Number.isFinite(envValue) || envValue <= 0) {
+      return 30000;
+    }
+    return Math.floor(envValue);
+  }
+
+  private getProxyMarkCooldownMs(): number {
+    const envValue = Number(process.env.WHATSAPP_PROXY_MARK_COOLDOWN_MS ?? "60000");
+    if (!Number.isFinite(envValue) || envValue <= 0) {
+      return 60000;
+    }
+    return Math.floor(envValue);
+  }
+
+  private isBrowserLifecycleError(message?: string | null): boolean {
+    if (!message) return false;
+    return /(detached frame|target closed|protocol error|execution context was destroyed|Cannot find context with specified id|Session closed)/i.test(
+      message
+    );
+  }
+
+  private isProxyConnectivityError(message?: string | null): boolean {
+    if (!message) return false;
+    return /(ERR_SOCKS_CONNECTION_FAILED|ERR_PROXY_CONNECTION_FAILED|proxy connection|socks connection|tunnel socket could not be established|ECONNREFUSED 127\.0\.0\.1:9)/i.test(
+      message
+    );
+  }
+
+  private isWwebjsContextError(message?: string | null): boolean {
+    if (!message) return false;
+    return /(reading 'getChat'|reading 'markedUnread'|WWebJS is not defined|window\.WWebJS)/i.test(
+      message
+    );
+  }
+
+  private async safeGetClientState(
+    client: any,
+    timeoutMs = 3000
+  ): Promise<{ state: string | null; error: string | null }> {
+    if (!client?.getState) {
+      return { state: null, error: "getState_not_available" };
+    }
+    try {
+      const state = await this.getStateWithTimeout(client, timeoutMs);
+      return { state, error: null };
+    } catch (error: any) {
+      return {
+        state: null,
+        error: error?.message ?? String(error),
+      };
+    }
+  }
+
+  private async buildSendReadinessSnapshot(
+    sessionId: string,
+    whatsappClient: WhatsAppClient
+  ): Promise<{
+    ready: boolean;
+    reason: string;
+    details: Record<string, unknown>;
+  }> {
+    const client: any = whatsappClient?.client;
+    const page = client?.pupPage;
+    const browser = client?.pupBrowser;
+    const hasPage = Boolean(page?.evaluate);
+    const pageClosed =
+      hasPage && typeof page?.isClosed === "function" ? Boolean(page.isClosed()) : null;
+    const browserConnected =
+      typeof browser?.isConnected === "function" ? Boolean(browser.isConnected()) : null;
+    const stateResult = await this.safeGetClientState(client, 3000);
+
+    let hasStore = false;
+    let hasWWebJS = false;
+    let hasWWebJSGetChat = false;
+    let evaluateError: string | null = null;
+
+    if (hasPage && pageClosed !== true) {
+      try {
+        const evaluated = (await this.runWithTimeout(
+          page.evaluate(() => {
+            const w = window as any;
+            return {
+              hasStore: Boolean(w?.Store),
+              hasWWebJS: Boolean(w?.WWebJS),
+              hasWWebJSGetChat: typeof w?.WWebJS?.getChat === "function",
+            };
+          }),
+          3000,
+          "send_readiness_evaluate",
+          sessionId
+        )) as { hasStore?: boolean; hasWWebJS?: boolean; hasWWebJSGetChat?: boolean };
+        hasStore = Boolean(evaluated?.hasStore);
+        hasWWebJS = Boolean(evaluated?.hasWWebJS);
+        hasWWebJSGetChat = Boolean(evaluated?.hasWWebJSGetChat);
+      } catch (error: any) {
+        evaluateError = error?.message ?? String(error);
+      }
+    }
+
+    let reason = "ok";
+    if (!client) {
+      reason = "missing_client";
+    } else if (whatsappClient.status !== "connected") {
+      reason = "manager_not_connected";
+    } else if (!hasPage) {
+      reason = "missing_page";
+    } else if (pageClosed === true) {
+      reason = "page_closed";
+    } else if (browserConnected === false) {
+      reason = "browser_disconnected";
+    } else if (stateResult.error) {
+      reason = `state_error:${stateResult.error}`;
+    } else if (stateResult.state !== "CONNECTED") {
+      reason = `state_${String(stateResult.state ?? "unknown").toLowerCase()}`;
+    } else if (evaluateError) {
+      reason = `evaluate_error:${evaluateError}`;
+    } else if (!hasStore) {
+      reason = "store_not_injected";
+    } else if (!hasWWebJS) {
+      reason = "wwebjs_not_injected";
+    } else if (!hasWWebJSGetChat) {
+      reason = "wwebjs_getchat_missing";
+    }
+
+    return {
+      ready: reason === "ok",
+      reason,
+      details: {
+        managerStatus: whatsappClient.status,
+        clientState: stateResult.state,
+        clientStateError: stateResult.error,
+        hasPage,
+        pageClosed,
+        browserConnected,
+        hasStore,
+        hasWWebJS,
+        hasWWebJSGetChat,
+        evaluateError,
+      },
+    };
+  }
+
+  private async ensureSendReadiness(
+    sessionId: string,
+    whatsappClient: WhatsAppClient
+  ): Promise<void> {
+    const readiness = await this.buildSendReadinessSnapshot(sessionId, whatsappClient);
+    if (readiness.ready) {
+      return;
+    }
+
+    const reasonMessage = `SESSION_NOT_READY: ${readiness.reason}`;
+
+    if (this.isProxyConnectivityError(reasonMessage)) {
+      try {
+        await this.markProxyUnhealthyFromSession(sessionId, reasonMessage);
+      } catch (error: any) {
+        console.warn(
+          `[wa][${sessionId}] failed to mark proxy unhealthy on readiness guard:`,
+          error?.message ?? error
+        );
+      }
+    }
+
+    try {
+      await this.markSessionDisconnected(
+        sessionId,
+        whatsappClient,
+        "session_not_ready",
+        reasonMessage
+      );
+    } catch (error: any) {
+      console.warn(
+        `[wa][${sessionId}] failed to mark disconnected on readiness guard:`,
+        error?.message ?? error
+      );
+    }
+
+    this.queueControlledReconnect(sessionId, reasonMessage);
+
+    throw new WhatsAppSessionNotReadyError(
+      "Session is not ready to send messages",
+      {
+        sessionId,
+        reason: readiness.reason,
+        ...readiness.details,
+      }
+    );
+  }
+
+  private async markProxyUnhealthyFromSession(
+    sessionId: string,
+    errorMessage: string
+  ): Promise<void> {
+    const session = await storage.getSession(sessionId);
+    const proxyServerId = session?.proxyServerId ? String(session.proxyServerId) : null;
+    if (!proxyServerId) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    const blockUntilMs = this.proxyMarkCooldownUntil.get(proxyServerId) ?? 0;
+    if (blockUntilMs > nowMs) {
+      return;
+    }
+    this.proxyMarkCooldownUntil.set(proxyServerId, nowMs + this.getProxyMarkCooldownMs());
+
+    const now = new Date();
+    await storage.updateProxyServer(proxyServerId, {
+      status: "offline",
+      lastError: errorMessage,
+      lastCheckAt: now,
+    });
+    await storage.createSystemLog({
+      level: "warning",
+      source: "proxy",
+      message: `Proxy marked unhealthy from send failure (${sessionId})`,
+      metadata: {
+        sessionId,
+        proxyServerId,
+        error: errorMessage,
+      },
+    });
+  }
+
+  private queueControlledReconnect(sessionId: string, reason: string): void {
+    const existing = this.reconnectInFlight.get(sessionId);
+    if (existing) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    const availableAt = this.reconnectCooldownUntil.get(sessionId) ?? 0;
+    if (availableAt > nowMs) {
+      return;
+    }
+    this.reconnectCooldownUntil.set(sessionId, nowMs + this.getSendReconnectCooldownMs());
+
+    const task = (async () => {
+      const startedAt = new Date();
+      console.warn(`[wa][${sessionId}] controlled reconnect start (${reason})`);
+
+      try {
+        const session = await storage.getSession(sessionId);
+        if (!session) {
+          return;
+        }
+        if (session.status === "auth_failed") {
+          return;
+        }
+
+        await storage.updateSession(sessionId, {
+          status: "reconnecting",
+          qrCode: null,
+          reconnectCount: (session.reconnectCount ?? 0) + 1,
+          lastReconnectAt: startedAt,
+        });
+
+        await this.destroySession(sessionId);
+        await storage.updateSession(sessionId, {
+          status: "initializing",
+          qrCode: null,
+        });
+        await this.createSession(sessionId);
+      } catch (error: any) {
+        const message = error?.message ?? String(error);
+        console.error(`[wa][${sessionId}] controlled reconnect failed:`, message);
+        await storage.updateSession(sessionId, {
+          status: /auth/i.test(message) ? "auth_failed" : "disconnected",
+        });
+        await storage.createSystemLog({
+          level: "error",
+          source: "whatsapp",
+          message: `Controlled reconnect failed for session ${sessionId}`,
+          metadata: {
+            sessionId,
+            reason,
+            error: message,
+          },
+        });
+      }
+    })()
+      .catch((error: any) => {
+        console.error(
+          `[wa][${sessionId}] controlled reconnect unhandled error:`,
+          error?.message ?? error
+        );
+      })
+      .finally(() => {
+        this.reconnectInFlight.delete(sessionId);
+      });
+
+    this.reconnectInFlight.set(sessionId, task);
+  }
+
+  private async logSendFailure(
+    sessionId: string,
+    whatsappClient: WhatsAppClient,
+    error: any
+  ): Promise<void> {
+    try {
+      const session = await storage.getSession(sessionId);
+      const state = await this.safeGetClientState(whatsappClient?.client, 2500);
+      const proxyId = session?.proxyServerId ? String(session.proxyServerId) : null;
+      const payload = {
+        sessionId,
+        proxyId,
+        dbStatus: session?.status ?? null,
+        managerStatus: whatsappClient.status,
+        clientState: state.state,
+        clientStateError: state.error,
+        errorName: error?.name ?? null,
+        errorMessage: error?.message ?? String(error),
+        stack: error?.stack ?? null,
+      };
+
+      console.error(`[wa][${sessionId}] sendMessage error`, payload);
+    } catch (logError: any) {
+      console.error(
+        `[wa][${sessionId}] sendMessage error (context logging failed)`,
+        {
+          message: error?.message ?? String(error),
+          stack: error?.stack ?? null,
+          loggingError: logError?.message ?? String(logError),
+        }
+      );
+    }
   }
 
   private syncPollingForSessions() {
@@ -1812,6 +2157,8 @@ class WhatsAppManager {
       }
 
       const formattedNumber = `${normalized}@c.us`;
+
+      await this.ensureSendReadiness(sessionId, whatsappClient);
       
       const isRegistered = await whatsappClient.client.isRegisteredUser(formattedNumber);
       if (!isRegistered) {
@@ -1839,20 +2186,50 @@ class WhatsAppManager {
       if (error instanceof WhatsAppSendPolicyError) {
         throw error;
       }
-      console.error('Error sending message:', error.message);
-      
-      if (error.message.includes('detached Frame') || 
-          error.message.includes('Target closed') ||
-          error.message.includes('Protocol error')) {
-        await this.markSessionDisconnected(
-          sessionId,
-          whatsappClient,
-          "browser_error",
-          error.message
-        );
-        console.log('Session marked as disconnected due to browser error:', sessionId);
+      if (error instanceof WhatsAppSessionNotReadyError) {
+        throw error;
       }
-      
+
+      await this.logSendFailure(sessionId, whatsappClient, error);
+
+      const errorMessage = error?.message ?? String(error);
+      const isProxyError = this.isProxyConnectivityError(errorMessage);
+      const isBrowserError = this.isBrowserLifecycleError(errorMessage);
+      const isWwebjsError = this.isWwebjsContextError(errorMessage);
+
+      if (isProxyError) {
+        try {
+          await this.markProxyUnhealthyFromSession(sessionId, errorMessage);
+        } catch (proxyMarkError: any) {
+          console.warn(
+            `[wa][${sessionId}] failed to mark proxy unhealthy after send error:`,
+            proxyMarkError?.message ?? proxyMarkError
+          );
+        }
+      }
+
+      if (isProxyError || isBrowserError || isWwebjsError) {
+        const reason = isProxyError
+          ? "proxy_error"
+          : isWwebjsError
+            ? "wwebjs_context_error"
+            : "browser_error";
+        try {
+          await this.markSessionDisconnected(
+            sessionId,
+            whatsappClient,
+            reason,
+            errorMessage
+          );
+        } catch (markError: any) {
+          console.warn(
+            `[wa][${sessionId}] failed to mark disconnected after send error:`,
+            markError?.message ?? markError
+          );
+        }
+        this.queueControlledReconnect(sessionId, `${reason}:${errorMessage}`);
+      }
+
       throw error;
     }
   }
