@@ -349,6 +349,12 @@ class CampaignEngine {
     return envValue ?? 5000;
   }
 
+  private getCampaignPreverifySessionCount(): number {
+    const envValue = this.parsePositiveIntEnv(process.env.CAMPAIGN_PREVERIFY_SESSION_COUNT);
+    const safe = envValue ?? 2;
+    return Math.min(Math.max(safe, 1), 5);
+  }
+
   private getCampaignPauseEnabled(): boolean {
     if (this.campaignPauseEnabledOverride !== null) {
       return this.campaignPauseEnabledOverride;
@@ -748,7 +754,7 @@ class CampaignEngine {
     let attempt = 0;
 
     while (this.activeCampaigns.get(campaignId)) {
-      const connected = this.getConnectedSessions(pool);
+      const connected = await this.getSendReadySessions(campaignId, pool, reason, []);
       if (connected.length > 0) {
         return true;
       }
@@ -1143,10 +1149,14 @@ class CampaignEngine {
 
       if (canUseWhatsapp && pool) {
         while (this.activeCampaigns.get(campaignId)) {
-          const connectedSessions = this.getConnectedSessions(pool);
-          let availableSessions = connectedSessions.filter(
-            (id) => !attemptedSessionIds.includes(id)
+          const connectedSessions = await this.getSendReadySessions(
+            campaignId,
+            pool,
+            "send_loop",
+            attemptedSessionIds,
+            debtor.id
           );
+          let availableSessions = connectedSessions;
 
           if (availableSessions.length === 0) {
             if (connectedSessions.length > 0 && sessionRetryResets < maxSessionRetryResets) {
@@ -1163,9 +1173,13 @@ class CampaignEngine {
                 }
               }
               attemptedSessionIds.length = 0;
-              availableSessions = this
-                .getConnectedSessions(pool)
-                .filter((id) => !attemptedSessionIds.includes(id));
+              availableSessions = await this.getSendReadySessions(
+                campaignId,
+                pool,
+                "session_retry_reset",
+                attemptedSessionIds,
+                debtor.id
+              );
             }
 
             if (availableSessions.length === 0) {
@@ -1193,9 +1207,13 @@ class CampaignEngine {
               }
 
               attemptedSessionIds.length = 0;
-              availableSessions = this
-                .getConnectedSessions(pool)
-                .filter((id) => !attemptedSessionIds.includes(id));
+              availableSessions = await this.getSendReadySessions(
+                campaignId,
+                pool,
+                "post_recovery",
+                attemptedSessionIds,
+                debtor.id
+              );
             }
 
             if (availableSessions.length === 0) {
@@ -1237,9 +1255,13 @@ class CampaignEngine {
             break;
           } catch (error: any) {
             lastError = error;
-            const remainingSessions = this
-              .getConnectedSessions(pool)
-              .filter((id) => !attemptedSessionIds.includes(id));
+            const remainingSessions = await this.getSendReadySessions(
+              campaignId,
+              pool,
+              "send_error_remaining",
+              attemptedSessionIds,
+              debtor.id
+            );
 
             if (error?.retryable && remainingSessions.length > 0) {
               await this.removeSessionFromPool(
@@ -1637,6 +1659,62 @@ class CampaignEngine {
     return pool.sessionIds.filter(id => connectedInMemory.includes(id));
   }
 
+  private async getSendReadySessions(
+    campaignId: string,
+    pool: Pool,
+    reason: string,
+    attemptedSessionIds: string[] = [],
+    debtorId?: string
+  ): Promise<string[]> {
+    const verified = this
+      .getConnectedSessions(pool)
+      .filter((id) => !attemptedSessionIds.includes(id));
+    if (verified.length > 0) {
+      return verified;
+    }
+
+    const probeCount = this.getCampaignPreverifySessionCount();
+    const candidates = (pool.sessionIds ?? [])
+      .filter((id) => !attemptedSessionIds.includes(id))
+      .filter((id) => whatsappManager.isSessionConnected(id))
+      .slice(0, probeCount);
+
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    let recovered = 0;
+    for (const sessionId of candidates) {
+      const result = await whatsappManager.verifySessionNow(sessionId, 5000);
+      if (result.ok) {
+        recovered += 1;
+      }
+    }
+
+    const refreshed = this
+      .getConnectedSessions(pool)
+      .filter((id) => !attemptedSessionIds.includes(id));
+
+    if (recovered > 0) {
+      await storage.createSystemLog({
+        level: "info",
+        source: "campaign",
+        message: `Recovered verified sessions before send (${recovered}/${candidates.length})`,
+        metadata: {
+          campaignId,
+          poolId: pool.id,
+          reason,
+          debtorId: debtorId ?? null,
+          attemptedSessionIds,
+          candidates,
+          refreshedCount: refreshed.length,
+        },
+      });
+    }
+
+    return refreshed;
+  }
+
   private getAllConnectedSessions(): string[] {
     return whatsappManager.getVerifiedConnectedSessionIdsWithOptions({ includeNotify: false });
   }
@@ -1731,7 +1809,13 @@ class CampaignEngine {
     }
 
     const target = minSessions ?? this.getCampaignMinPoolSessions();
-    const connected = this.getConnectedSessions(pool);
+    const connected = await this.getSendReadySessions(
+      campaignId,
+      pool,
+      reason,
+      [],
+      debtorId
+    );
     if (connected.length >= target) {
       return true;
     }
@@ -1746,7 +1830,14 @@ class CampaignEngine {
     const toAdd = candidates.slice(0, needed);
     await this.addSessionsToPool(campaignId, pool, toAdd, reason, debtorId);
 
-    return this.getConnectedSessions(pool).length >= target;
+    const refreshed = await this.getSendReadySessions(
+      campaignId,
+      pool,
+      "refill_post_add",
+      [],
+      debtorId
+    );
+    return refreshed.length >= target;
   }
 
   private async ensurePoolHasConnectedSessions(
@@ -1757,7 +1848,13 @@ class CampaignEngine {
     minSessions?: number
   ): Promise<boolean> {
     const target = minSessions ?? this.getCampaignMinPoolSessions();
-    const connected = this.getConnectedSessions(pool);
+    const connected = await this.getSendReadySessions(
+      campaignId,
+      pool,
+      reason,
+      [],
+      debtorId
+    );
     if (connected.length >= target) {
       return true;
     }
@@ -1826,10 +1923,16 @@ class CampaignEngine {
     return (
       message.includes("session not connected") ||
       message.includes("session not found") ||
+      message.includes("session_not_ready") ||
+      message.includes("session is not ready to send messages") ||
+      message.includes("reading 'getchat'") ||
+      message.includes("reading 'markedunread'") ||
       message.includes("target closed") ||
       message.includes("detached frame") ||
       message.includes("protocol error") ||
-      message.includes("execution context was destroyed")
+      message.includes("execution context was destroyed") ||
+      message.includes("err_proxy_connection_failed") ||
+      message.includes("err_socks_connection_failed")
     );
   }
 

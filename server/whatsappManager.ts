@@ -2318,6 +2318,34 @@ class WhatsAppManager {
     return snapshot;
   }
 
+  async verifySessionNow(
+    sessionId: string,
+    timeoutMs = 5000
+  ): Promise<{ ok: boolean; error?: string }> {
+    const whatsappClient = this.clients.get(sessionId);
+    if (!whatsappClient) {
+      return { ok: false, error: "session_not_found" };
+    }
+
+    try {
+      const result = await this.verifyConnectedState(
+        sessionId,
+        whatsappClient.client,
+        whatsappClient,
+        {
+          stateGetter: () =>
+            this.getStateWithTimeout(whatsappClient.client, timeoutMs),
+        }
+      );
+      return result;
+    } catch (error: any) {
+      return {
+        ok: false,
+        error: error?.message ?? String(error),
+      };
+    }
+  }
+
   async verifyNow(): Promise<VerifyNowResult> {
     const timeoutMs = 5000;
     const sessions = await storage.getSessions();
