@@ -108,6 +108,7 @@ export default function Sessions() {
   const [healthSnapshot, setHealthSnapshot] = useState<SessionHealthSnapshot[] | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [showAvailableSessions, setShowAvailableSessions] = useState(true);
+  const [showUnavailableSessions, setShowUnavailableSessions] = useState(true);
   const [selectedProxyId, setSelectedProxyId] = useState<string>(NO_PROXY_VALUE);
   const [detailsSessionId, setDetailsSessionId] = useState<string | null>(null);
   const [detailsTargetProxyId, setDetailsTargetProxyId] = useState<string>(NO_PROXY_VALUE);
@@ -1086,24 +1087,42 @@ export default function Sessions() {
                     )}
                   </div>
 
-                  <div className="rounded-md border">
-                    <div className="px-4 py-3 text-sm font-medium bg-muted/40">
-                      Desconectadas / no disponibles ({disconnectedSessions.length})
-                    </div>
-                    {disconnectedSessions.length === 0 ? (
-                      <div className="px-4 py-4 text-sm text-muted-foreground">
-                        No hay sesiones desconectadas.
-                      </div>
-                    ) : (
-                      <div className="divide-y">
-                        <div className="grid grid-cols-12 gap-4 px-4 py-2 text-xs text-muted-foreground">
-                          <div className="col-span-4">Sesión</div>
-                          <div className="col-span-2">Estado</div>
-                          <div className="col-span-2">Enviados</div>
-                          <div className="col-span-2">Última actividad</div>
-                          <div className="col-span-2 text-right">Acciones</div>
-                        </div>
-                        {disconnectedSessions.map(renderSessionRow)}
+                  <div className="rounded-md border bg-slate-50/70 border-slate-200/70">
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-slate-900"
+                      onClick={() => setShowUnavailableSessions((prev) => !prev)}
+                    >
+                      <span className="flex items-center gap-2">
+                        {showUnavailableSessions ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                        Desconectadas / no disponibles ({disconnectedSessions.length})
+                      </span>
+                      <span className="text-xs text-slate-700">
+                        {showUnavailableSessions ? "Ocultar" : "Mostrar"}
+                      </span>
+                    </button>
+                    {showUnavailableSessions && (
+                      <div className="border-t border-slate-200/70">
+                        {disconnectedSessions.length === 0 ? (
+                          <div className="px-4 py-4 text-sm text-muted-foreground">
+                            No hay sesiones desconectadas.
+                          </div>
+                        ) : (
+                          <div className="divide-y bg-background rounded-b-md">
+                            <div className="grid grid-cols-12 gap-4 px-4 py-2 text-xs text-muted-foreground">
+                              <div className="col-span-4">Sesión</div>
+                              <div className="col-span-2">Estado</div>
+                              <div className="col-span-2">Enviados</div>
+                              <div className="col-span-2">Última actividad</div>
+                              <div className="col-span-2 text-right">Acciones</div>
+                            </div>
+                            {disconnectedSessions.map(renderSessionRow)}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
