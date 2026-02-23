@@ -29,7 +29,16 @@ import {
   useStopSession,
   type SessionHealthSnapshot,
 } from "@/lib/api";
-import { Smartphone, Plus, Trash2, RefreshCw, QrCode, Loader2 } from "lucide-react";
+import {
+  Smartphone,
+  Plus,
+  Trash2,
+  RefreshCw,
+  QrCode,
+  Loader2,
+  ChevronDown,
+  ChevronRight,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Session } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
@@ -98,6 +107,7 @@ export default function Sessions() {
   const [qrModalMode, setQrModalMode] = useState<"create" | "reconnect">("create");
   const [healthSnapshot, setHealthSnapshot] = useState<SessionHealthSnapshot[] | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [showAvailableSessions, setShowAvailableSessions] = useState(true);
   const [selectedProxyId, setSelectedProxyId] = useState<string>(NO_PROXY_VALUE);
   const [detailsSessionId, setDetailsSessionId] = useState<string | null>(null);
   const [detailsTargetProxyId, setDetailsTargetProxyId] = useState<string>(NO_PROXY_VALUE);
@@ -526,6 +536,16 @@ export default function Sessions() {
     return sessionList.find((session) => session.id === detailsSessionId);
   }, [detailsSessionId, sessionList]);
 
+  const availableSessions = useMemo(
+    () => (sessionList ?? []).filter((session) => session.status === "connected"),
+    [sessionList]
+  );
+
+  const disconnectedSessions = useMemo(
+    () => (sessionList ?? []).filter((session) => session.status !== "connected"),
+    [sessionList]
+  );
+
   useEffect(() => {
     if (!detailsSession) return;
     setDetailsTargetProxyId(detailsSession.proxyServerId ?? NO_PROXY_VALUE);
@@ -653,6 +673,178 @@ export default function Sessions() {
     : false;
   const formatDateTime = (value?: Date | string | null) =>
     value ? new Date(value).toLocaleString() : "-";
+
+  const renderSessionRow = (session: Session) => {
+    const canShowQr =
+      session.status === "qr_ready" ||
+      ["disconnected", "auth_failed"].includes(session.status);
+    const isSessionRunningTask =
+      reconnectingId === session.id ||
+      resettingId === session.id ||
+      stoppingId === session.id ||
+      waitingQrId === session.id;
+    const isProgressStatus =
+      session.status === "initializing" ||
+      session.status === "reconnecting";
+    const canResetAuth =
+      canDeleteSessions &&
+      ["disconnected", "auth_failed", "authenticated", "qr_ready"].includes(
+        session.status
+      );
+    const lastActive = session.lastActive
+      ? new Date(session.lastActive).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "-";
+    const proxy = session.proxyServerId
+      ? proxyById.get(session.proxyServerId)
+      : undefined;
+    const proxyStatus = proxy?.status ?? "offline";
+    const proxyLabel = proxy ? proxy.name : "Sin proxy";
+    const proxyIp = proxy?.lastPublicIp ?? null;
+    const health = session.healthStatus ?? "unknown";
+    const healthBadgeClass =
+      health === "healthy"
+        ? "text-green-700 border-green-200 bg-green-50"
+        : health === "warning"
+          ? "text-amber-700 border-amber-200 bg-amber-50"
+          : health === "risky"
+            ? "text-orange-700 border-orange-200 bg-orange-50"
+            : health === "cooldown"
+              ? "text-blue-700 border-blue-200 bg-blue-50"
+              : health === "blocked"
+                ? "text-red-700 border-red-200 bg-red-50"
+                : "text-gray-700 border-gray-200 bg-gray-50";
+    const cooldownHint =
+      session.cooldownUntil && new Date(session.cooldownUntil).getTime() > Date.now()
+        ? new Date(session.cooldownUntil).toLocaleString()
+        : null;
+
+    return (
+      <div
+        key={session.id}
+        className="grid grid-cols-12 items-center gap-4 px-4 py-3 text-sm"
+      >
+        <div className="col-span-4 flex items-center gap-3 min-w-0">
+          <div
+            className={[
+              "h-9 w-9 rounded-lg flex items-center justify-center shadow-sm",
+              session.status === "connected"
+                ? "bg-gradient-to-br from-green-400 to-green-600 text-white"
+                : session.status === "auth_failed"
+                  ? "bg-gradient-to-br from-red-400 to-red-600 text-white"
+                  : session.status === "qr_ready"
+                    ? "bg-gradient-to-br from-blue-400 to-blue-600 text-white"
+                    : "bg-gradient-to-br from-gray-200 to-gray-400 text-gray-600",
+            ].join(" ")}
+          >
+            <Smartphone className="h-5 w-5" />
+          </div>
+          <div className="min-w-0">
+            <div className="font-medium truncate">
+              {session.phoneNumber || "Pendiente..."}
+            </div>
+            <div className="text-xs text-muted-foreground font-mono">
+              {(session.id ?? "").slice(0, 12) || "sin-id"}...
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Proxy: {proxyLabel} · {proxyStatus}
+              {proxyIp ? ` · ${proxyIp}` : ""}
+            </div>
+            {session.purpose === "notify" && (
+              <Badge variant="outline" className="mt-1 text-xs">
+                Notificaciones
+              </Badge>
+            )}
+          </div>
+        </div>
+        <div className="col-span-2">
+          <div className="flex flex-col gap-1">
+            <Badge
+              variant={session.status === "connected" ? "outline" : "secondary"}
+              className={
+                session.status === "connected"
+                  ? "text-green-600 border-green-200 bg-green-50"
+                  : session.status === "qr_ready"
+                    ? "text-blue-600 border-blue-200 bg-blue-50"
+                    : ""
+              }
+            >
+              {displayStatus(session.status)}
+            </Badge>
+            <Badge variant="outline" className={healthBadgeClass}>
+              {displayHealth(health)}
+            </Badge>
+            {cooldownHint && (
+              <span className="text-[10px] text-blue-700">
+                Hasta {cooldownHint}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="col-span-2 font-semibold">
+          {(session.messagesSent ?? 0).toLocaleString()}
+        </div>
+        <div className="col-span-2 text-xs text-muted-foreground">{lastActive}</div>
+        <div className="col-span-2 flex items-center justify-end gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setDetailsSessionId(session.id)}
+            disabled={isSessionRunningTask}
+          >
+            Detalle
+          </Button>
+          {canShowQr && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => handleOpenQr(session)}
+              disabled={isSessionRunningTask || isProgressStatus}
+            >
+              {isSessionRunningTask ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <QrCode className="h-4 w-4" />
+              )}
+              QR
+            </Button>
+          )}
+          {canResetAuth && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => handleResetAuth(session)}
+              disabled={isSessionRunningTask || isProgressStatus}
+            >
+              {isSessionRunningTask ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : null}
+              Reiniciar auth
+            </Button>
+          )}
+          {canDeleteSessions && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground hover:text-destructive"
+              onClick={() => handleDeleteSession(session.id)}
+              disabled={
+                deleteSession.isPending ||
+                isSessionRunningTask ||
+                isProgressStatus
+              }
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <Layout>
@@ -841,8 +1033,10 @@ export default function Sessions() {
         ) : (
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base">Sesiones disponibles</CardTitle>
-              <CardDescription>Listado compacto para administrar conexiones y QR.</CardDescription>
+              <CardTitle className="text-base">Sesiones</CardTitle>
+              <CardDescription>
+                Separa números disponibles de sesiones desconectadas/no disponibles.
+              </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
               {!sessionList?.length ? (
@@ -851,184 +1045,68 @@ export default function Sessions() {
                   <p className="text-sm">No hay sesiones registradas</p>
                 </div>
               ) : (
-                <div className="divide-y">
-                  <div className="grid grid-cols-12 gap-4 px-4 py-2 text-xs text-muted-foreground">
-                    <div className="col-span-4">Sesión</div>
-                    <div className="col-span-2">Estado</div>
-                    <div className="col-span-2">Enviados</div>
-                    <div className="col-span-2">Última actividad</div>
-                    <div className="col-span-2 text-right">Acciones</div>
-                  </div>
-                  {(sessionList ?? []).map((session) => {
-                    const canShowQr =
-                      session.status === "qr_ready" ||
-                      ["disconnected", "auth_failed"].includes(session.status);
-                    const isSessionRunningTask =
-                      reconnectingId === session.id ||
-                      resettingId === session.id ||
-                      stoppingId === session.id ||
-                      waitingQrId === session.id;
-                    const isProgressStatus =
-                      session.status === "initializing" ||
-                      session.status === "reconnecting";
-                    const canResetAuth =
-                      canDeleteSessions &&
-                      ["disconnected", "auth_failed", "authenticated", "qr_ready"].includes(
-                        session.status
-                      );
-                    const lastActive = session.lastActive
-                      ? new Date(session.lastActive).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })
-                      : "-";
-                    const proxy = session.proxyServerId
-                      ? proxyById.get(session.proxyServerId)
-                      : undefined;
-                    const proxyStatus = proxy?.status ?? "offline";
-                    const proxyLabel = proxy ? proxy.name : "Sin proxy";
-                    const proxyIp = proxy?.lastPublicIp ?? null;
-                    const health = session.healthStatus ?? "unknown";
-                    const healthBadgeClass =
-                      health === "healthy"
-                        ? "text-green-700 border-green-200 bg-green-50"
-                        : health === "warning"
-                          ? "text-amber-700 border-amber-200 bg-amber-50"
-                          : health === "risky"
-                            ? "text-orange-700 border-orange-200 bg-orange-50"
-                            : health === "cooldown"
-                              ? "text-blue-700 border-blue-200 bg-blue-50"
-                              : health === "blocked"
-                                ? "text-red-700 border-red-200 bg-red-50"
-                                : "text-gray-700 border-gray-200 bg-gray-50";
-                    const cooldownHint =
-                      session.cooldownUntil && new Date(session.cooldownUntil).getTime() > Date.now()
-                        ? new Date(session.cooldownUntil).toLocaleString()
-                        : null;
-                    return (
-                      <div
-                        key={session.id}
-                        className="grid grid-cols-12 items-center gap-4 px-4 py-3 text-sm"
-                      >
-                        <div className="col-span-4 flex items-center gap-3 min-w-0">
-                          <div
-                            className={[
-                              "h-9 w-9 rounded-lg flex items-center justify-center shadow-sm",
-                              session.status === "connected"
-                                ? "bg-gradient-to-br from-green-400 to-green-600 text-white"
-                                : session.status === "auth_failed"
-                                  ? "bg-gradient-to-br from-red-400 to-red-600 text-white"
-                                  : session.status === "qr_ready"
-                                    ? "bg-gradient-to-br from-blue-400 to-blue-600 text-white"
-                                    : "bg-gradient-to-br from-gray-200 to-gray-400 text-gray-600",
-                            ].join(" ")}
-                          >
-                            <Smartphone className="h-5 w-5" />
+                <div className="p-4 space-y-4">
+                  <div className="rounded-md border bg-emerald-50/60 border-emerald-200/70">
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-emerald-900"
+                      onClick={() => setShowAvailableSessions((prev) => !prev)}
+                    >
+                      <span className="flex items-center gap-2">
+                        {showAvailableSessions ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                        Disponibles ({availableSessions.length})
+                      </span>
+                      <span className="text-xs text-emerald-800">
+                        {showAvailableSessions ? "Ocultar" : "Mostrar"}
+                      </span>
+                    </button>
+                    {showAvailableSessions && (
+                      <div className="border-t border-emerald-200/70">
+                        {availableSessions.length === 0 ? (
+                          <div className="px-4 py-4 text-sm text-muted-foreground">
+                            No hay sesiones conectadas disponibles.
                           </div>
-                          <div className="min-w-0">
-                            <div className="font-medium truncate">
-                              {session.phoneNumber || "Pendiente..."}
+                        ) : (
+                          <div className="divide-y bg-background rounded-b-md">
+                            <div className="grid grid-cols-12 gap-4 px-4 py-2 text-xs text-muted-foreground">
+                              <div className="col-span-4">Sesión</div>
+                              <div className="col-span-2">Estado</div>
+                              <div className="col-span-2">Enviados</div>
+                              <div className="col-span-2">Última actividad</div>
+                              <div className="col-span-2 text-right">Acciones</div>
                             </div>
-                            <div className="text-xs text-muted-foreground font-mono">
-                              {(session.id ?? "").slice(0, 12) || "sin-id"}...
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              Proxy: {proxyLabel} · {proxyStatus}
-                              {proxyIp ? ` · ${proxyIp}` : ""}
-                            </div>
-                            {session.purpose === "notify" && (
-                              <Badge variant="outline" className="mt-1 text-xs">
-                                Notificaciones
-                              </Badge>
-                            )}
+                            {availableSessions.map(renderSessionRow)}
                           </div>
-                        </div>
-                        <div className="col-span-2">
-                          <div className="flex flex-col gap-1">
-                            <Badge
-                              variant={session.status === "connected" ? "outline" : "secondary"}
-                              className={
-                                session.status === "connected"
-                                  ? "text-green-600 border-green-200 bg-green-50"
-                                  : session.status === "qr_ready"
-                                    ? "text-blue-600 border-blue-200 bg-blue-50"
-                                    : ""
-                              }
-                            >
-                              {displayStatus(session.status)}
-                            </Badge>
-                            <Badge variant="outline" className={healthBadgeClass}>
-                              {displayHealth(health)}
-                            </Badge>
-                            {cooldownHint && (
-                              <span className="text-[10px] text-blue-700">
-                                Hasta {cooldownHint}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="col-span-2 font-semibold">
-                          {(session.messagesSent ?? 0).toLocaleString()}
-                        </div>
-                        <div className="col-span-2 text-xs text-muted-foreground">{lastActive}</div>
-                        <div className="col-span-2 flex items-center justify-end gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setDetailsSessionId(session.id)}
-                            disabled={isSessionRunningTask}
-                          >
-                            Detalle
-                          </Button>
-                          {canShowQr && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="gap-2"
-                              onClick={() => handleOpenQr(session)}
-                              disabled={isSessionRunningTask || isProgressStatus}
-                            >
-                              {isSessionRunningTask ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                              ) : (
-                                <QrCode className="h-4 w-4" />
-                              )}
-                              QR
-                            </Button>
-                          )}
-                          {canResetAuth && (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="gap-2"
-                                onClick={() => handleResetAuth(session)}
-                                disabled={isSessionRunningTask || isProgressStatus}
-                              >
-                                {isSessionRunningTask ? (
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : null}
-                                Reiniciar auth
-                              </Button>
-                            )}
-                          {canDeleteSessions && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="text-muted-foreground hover:text-destructive"
-                              onClick={() => handleDeleteSession(session.id)}
-                              disabled={
-                                deleteSession.isPending ||
-                                isSessionRunningTask ||
-                                isProgressStatus
-                              }
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          )}
-                        </div>
+                        )}
                       </div>
-                    );
-                  })}
+                    )}
+                  </div>
+
+                  <div className="rounded-md border">
+                    <div className="px-4 py-3 text-sm font-medium bg-muted/40">
+                      Desconectadas / no disponibles ({disconnectedSessions.length})
+                    </div>
+                    {disconnectedSessions.length === 0 ? (
+                      <div className="px-4 py-4 text-sm text-muted-foreground">
+                        No hay sesiones desconectadas.
+                      </div>
+                    ) : (
+                      <div className="divide-y">
+                        <div className="grid grid-cols-12 gap-4 px-4 py-2 text-xs text-muted-foreground">
+                          <div className="col-span-4">Sesión</div>
+                          <div className="col-span-2">Estado</div>
+                          <div className="col-span-2">Enviados</div>
+                          <div className="col-span-2">Última actividad</div>
+                          <div className="col-span-2 text-right">Acciones</div>
+                        </div>
+                        {disconnectedSessions.map(renderSessionRow)}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </CardContent>
