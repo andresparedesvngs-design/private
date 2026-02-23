@@ -25,6 +25,10 @@ class CampaignEngine {
     string,
     { timeout: NodeJS.Timeout; interval?: NodeJS.Timeout; until: number }
   > = new Map();
+  private campaignSessionBackstopTimers: Map<string, NodeJS.Timeout> = new Map();
+  private campaignSessionBackstopInFlight: Set<string> = new Set();
+  private campaignSessionBackstopCursor: Map<string, number> = new Map();
+  private campaignSessionBackstopLastLogAt: Map<string, number> = new Map();
   private readonly disconnectRefillIntervalMs = 60 * 1000;
 
   setSocketServer(io: SocketServer) {
@@ -173,6 +177,151 @@ class CampaignEngine {
     });
 
     this.startDisconnectCooldown(campaignId);
+  }
+
+  private getCampaignSessionBackstopEnabled(): boolean {
+    const envValue = this.parseBooleanEnv(
+      process.env.CAMPAIGN_SESSION_BACKSTOP_VERIFY_ENABLED
+    );
+    if (envValue !== null) {
+      return envValue;
+    }
+    return true;
+  }
+
+  private getCampaignSessionBackstopIntervalMs(): number {
+    const envValue = this.parsePositiveIntEnv(
+      process.env.CAMPAIGN_SESSION_BACKSTOP_VERIFY_INTERVAL_MS
+    );
+    const safe = envValue ?? 45000;
+    return Math.min(Math.max(safe, 10000), 5 * 60 * 1000);
+  }
+
+  private getCampaignSessionBackstopBatchSize(): number {
+    const envValue = this.parsePositiveIntEnv(
+      process.env.CAMPAIGN_SESSION_BACKSTOP_VERIFY_BATCH_SIZE
+    );
+    const safe = envValue ?? 3;
+    return Math.min(Math.max(safe, 1), 10);
+  }
+
+  private clearCampaignSessionBackstop(campaignId: string): void {
+    const timer = this.campaignSessionBackstopTimers.get(campaignId);
+    if (timer) {
+      clearInterval(timer);
+    }
+    this.campaignSessionBackstopTimers.delete(campaignId);
+    this.campaignSessionBackstopInFlight.delete(campaignId);
+    this.campaignSessionBackstopCursor.delete(campaignId);
+    this.campaignSessionBackstopLastLogAt.delete(campaignId);
+  }
+
+  private startCampaignSessionBackstop(campaignId: string, poolId?: string | null): void {
+    this.clearCampaignSessionBackstop(campaignId);
+    if (!this.getCampaignSessionBackstopEnabled()) {
+      return;
+    }
+    if (!poolId) {
+      return;
+    }
+
+    const intervalMs = this.getCampaignSessionBackstopIntervalMs();
+    const timer = setInterval(() => {
+      void this.runCampaignSessionBackstop(campaignId, poolId);
+    }, intervalMs);
+    this.campaignSessionBackstopTimers.set(campaignId, timer);
+
+    void this.runCampaignSessionBackstop(campaignId, poolId);
+  }
+
+  private async runCampaignSessionBackstop(
+    campaignId: string,
+    poolId: string
+  ): Promise<void> {
+    if (!this.activeCampaigns.get(campaignId)) {
+      this.clearCampaignSessionBackstop(campaignId);
+      return;
+    }
+    if (this.campaignSessionBackstopInFlight.has(campaignId)) {
+      return;
+    }
+
+    this.campaignSessionBackstopInFlight.add(campaignId);
+    try {
+      const pool = await storage.getPool(poolId);
+      if (!pool) {
+        this.clearCampaignSessionBackstop(campaignId);
+        return;
+      }
+
+      const sessionIds = Array.from(new Set((pool.sessionIds ?? []).filter(Boolean)));
+      if (sessionIds.length === 0) {
+        return;
+      }
+
+      const batchSize = this.getCampaignSessionBackstopBatchSize();
+      const cursor = this.campaignSessionBackstopCursor.get(campaignId) ?? 0;
+      const start = Math.min(Math.max(cursor, 0), Math.max(sessionIds.length - 1, 0));
+      const batch: string[] = [];
+      for (let i = 0; i < Math.min(batchSize, sessionIds.length); i += 1) {
+        batch.push(sessionIds[(start + i) % sessionIds.length]);
+      }
+      this.campaignSessionBackstopCursor.set(
+        campaignId,
+        (start + batch.length) % sessionIds.length
+      );
+
+      let okCount = 0;
+      let failCount = 0;
+      await Promise.all(
+        batch.map(async (sessionId) => {
+          const result = await whatsappManager.verifySessionNow(sessionId, 4000);
+          if (result.ok) {
+            okCount += 1;
+          } else {
+            failCount += 1;
+          }
+        })
+      );
+
+      if (failCount > 0) {
+        const now = Date.now();
+        const lastLogAt = this.campaignSessionBackstopLastLogAt.get(campaignId) ?? 0;
+        if (now - lastLogAt >= 60000) {
+          this.campaignSessionBackstopLastLogAt.set(campaignId, now);
+          await storage.createSystemLog({
+            level: "warning",
+            source: "campaign",
+            message: `Session backstop verify detected unstable sessions (${failCount}/${batch.length})`,
+            metadata: {
+              campaignId,
+              poolId,
+              batch,
+              okCount,
+              failCount,
+            },
+          });
+        }
+      }
+    } catch (error: any) {
+      const now = Date.now();
+      const lastLogAt = this.campaignSessionBackstopLastLogAt.get(campaignId) ?? 0;
+      if (now - lastLogAt >= 60000) {
+        this.campaignSessionBackstopLastLogAt.set(campaignId, now);
+        await storage.createSystemLog({
+          level: "error",
+          source: "campaign",
+          message: `Session backstop verify failed`,
+          metadata: {
+            campaignId,
+            poolId,
+            error: error?.message ?? String(error),
+          },
+        });
+      }
+    } finally {
+      this.campaignSessionBackstopInFlight.delete(campaignId);
+    }
   }
 
   async handleSessionDisconnected(sessionId: string, reason: string): Promise<void> {
@@ -911,6 +1060,9 @@ class CampaignEngine {
     }
 
     this.activeCampaigns.set(campaignId, true);
+    if (needsWhatsapp && pool?.id) {
+      this.startCampaignSessionBackstop(campaignId, pool.id);
+    }
 
     await storage.createSystemLog({
       level: 'info',
@@ -927,11 +1079,13 @@ class CampaignEngine {
 
     this.processCampaign(campaignId, campaign, pool, gsmPool, channel).catch((error) => {
       console.error('Error processing campaign:', error);
+      this.clearCampaignSessionBackstop(campaignId);
       this.activeCampaigns.delete(campaignId);
     });
   }
 
   async stopCampaign(campaignId: string, reason: string = "manual"): Promise<void> {
+    this.clearCampaignSessionBackstop(campaignId);
     this.activeCampaigns.delete(campaignId);
     
     await storage.updateCampaign(campaignId, {
@@ -1046,6 +1200,7 @@ class CampaignEngine {
         metadata: { campaignId }
       });
       
+      this.clearCampaignSessionBackstop(campaignId);
       this.activeCampaigns.delete(campaignId);
       return;
     }
@@ -1599,6 +1754,7 @@ class CampaignEngine {
     }
 
     if (!this.activeCampaigns.get(campaignId)) {
+      this.clearCampaignSessionBackstop(campaignId);
       this.activeCampaigns.delete(campaignId);
       await storage.createSystemLog({
         level: "info",
@@ -1615,6 +1771,7 @@ class CampaignEngine {
       pausedReason: null,
     });
 
+    this.clearCampaignSessionBackstop(campaignId);
     this.activeCampaigns.delete(campaignId);
 
     await storage.createSystemLog({
