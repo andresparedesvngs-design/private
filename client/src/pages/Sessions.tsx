@@ -1427,7 +1427,7 @@ export default function Sessions() {
                       <Button
                         variant="outline"
                         onClick={() => handleStopSession(detailsSession)}
-                        disabled={sessionStopped || detailsSessionBusy}
+                        disabled={detailsSessionBusy}
                       >
                         {detailsSessionBusy ? (
                           <Loader2 className="h-4 w-4 animate-spin mr-2" />

@@ -2119,8 +2119,48 @@ class WhatsAppManager {
     try {
       await client.initialize();
       console.log(`[wa][${sessionId}] createSession initialized`);
-    } catch (error) {
+    } catch (error: any) {
+      const message = error?.message ?? String(error);
       console.error(`[wa][${sessionId}] createSession initialize error:`, error);
+
+      this.stopIncomingPolling(sessionId);
+      this.clearQrWindow(sessionId);
+      const current = this.clients.get(sessionId);
+      if (current?.client === client) {
+        this.clients.delete(sessionId);
+      }
+
+      try {
+        await Promise.race([
+          client.destroy().catch(() => undefined),
+          sleep(5000).then(() => undefined),
+        ]);
+      } catch {
+        // Best effort cleanup.
+      }
+
+      const nextStatus = /auth/i.test(message) ? "auth_failed" : "disconnected";
+      await storage.updateSession(sessionId, {
+        status: nextStatus,
+        qrCode: null,
+        lastDisconnectAt: new Date(),
+        lastDisconnectReason: message,
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
+      });
+
+      if (this.isProxyConnectivityError(message)) {
+        try {
+          await this.markProxyUnhealthyFromSession(sessionId, message);
+        } catch (proxyMarkError: any) {
+          console.warn(
+            `[wa][${sessionId}] failed to mark proxy unhealthy on initialize error:`,
+            proxyMarkError?.message ?? proxyMarkError
+          );
+        }
+      }
+
       throw error;
     }
   }

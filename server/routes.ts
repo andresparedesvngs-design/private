@@ -857,10 +857,16 @@ export async function registerRoutes(
             });
           }
 
-          if (whatsappManager.getSession(existing.id)) {
-            return res.status(409).json({
-              error: "Detén la sesión antes de cambiar el proxy",
-            });
+          const runtimeSession = whatsappManager.getSession(existing.id);
+          if (runtimeSession) {
+            try {
+              await whatsappManager.destroySession(existing.id);
+            } catch (destroyError: any) {
+              return res.status(409).json({
+                error: "No se pudo detener la sesion antes de cambiar proxy",
+                details: destroyError?.message ?? String(destroyError),
+              });
+            }
           }
 
           if (currentProxyId && targetProxyId) {
