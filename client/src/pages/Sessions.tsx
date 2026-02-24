@@ -108,6 +108,7 @@ export default function Sessions() {
   const [healthSnapshot, setHealthSnapshot] = useState<SessionHealthSnapshot[] | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [showAvailableSessions, setShowAvailableSessions] = useState(true);
+  const [showLimitedSessions, setShowLimitedSessions] = useState(true);
   const [showUnavailableSessions, setShowUnavailableSessions] = useState(true);
   const [selectedProxyId, setSelectedProxyId] = useState<string>(NO_PROXY_VALUE);
   const [detailsSessionId, setDetailsSessionId] = useState<string | null>(null);
@@ -542,8 +543,16 @@ export default function Sessions() {
     [sessionList]
   );
 
+  const limitedSessions = useMemo(
+    () => (sessionList ?? []).filter((session) => session.status === "limited"),
+    [sessionList]
+  );
+
   const disconnectedSessions = useMemo(
-    () => (sessionList ?? []).filter((session) => session.status !== "connected"),
+    () =>
+      (sessionList ?? []).filter(
+        (session) => session.status !== "connected" && session.status !== "limited"
+      ),
     [sessionList]
   );
 
@@ -610,6 +619,7 @@ export default function Sessions() {
     initializing: "Inicializando",
     authenticated: "Autenticada",
     reconnecting: "Reconectando",
+    limited: "Limitada",
   };
   const displayStatus = (status: string) => sessionStatusLabels[status] ?? status;
   const sessionHealthLabels: Record<string, string> = {
@@ -733,6 +743,8 @@ export default function Sessions() {
               "h-9 w-9 rounded-lg flex items-center justify-center shadow-sm",
               session.status === "connected"
                 ? "bg-gradient-to-br from-green-400 to-green-600 text-white"
+                : session.status === "limited"
+                  ? "bg-gradient-to-br from-amber-300 to-amber-500 text-white"
                 : session.status === "auth_failed"
                   ? "bg-gradient-to-br from-red-400 to-red-600 text-white"
                   : session.status === "qr_ready"
@@ -767,6 +779,8 @@ export default function Sessions() {
               className={
                 session.status === "connected"
                   ? "text-green-600 border-green-200 bg-green-50"
+                  : session.status === "limited"
+                    ? "text-amber-700 border-amber-200 bg-amber-50"
                   : session.status === "qr_ready"
                     ? "text-blue-600 border-blue-200 bg-blue-50"
                     : ""
@@ -1036,7 +1050,7 @@ export default function Sessions() {
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Sesiones</CardTitle>
               <CardDescription>
-                Separa números disponibles de sesiones desconectadas/no disponibles.
+                Separa números disponibles, limitadas por cuota y desconectadas.
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
@@ -1081,6 +1095,46 @@ export default function Sessions() {
                               <div className="col-span-2 text-right">Acciones</div>
                             </div>
                             {availableSessions.map(renderSessionRow)}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-md border bg-amber-50/70 border-amber-200/70">
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-amber-900"
+                      onClick={() => setShowLimitedSessions((prev) => !prev)}
+                    >
+                      <span className="flex items-center gap-2">
+                        {showLimitedSessions ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                        Limitadas por cuota ({limitedSessions.length})
+                      </span>
+                      <span className="text-xs text-amber-800">
+                        {showLimitedSessions ? "Ocultar" : "Mostrar"}
+                      </span>
+                    </button>
+                    {showLimitedSessions && (
+                      <div className="border-t border-amber-200/70">
+                        {limitedSessions.length === 0 ? (
+                          <div className="px-4 py-4 text-sm text-muted-foreground">
+                            No hay sesiones temporalmente limitadas.
+                          </div>
+                        ) : (
+                          <div className="divide-y bg-background rounded-b-md">
+                            <div className="grid grid-cols-12 gap-4 px-4 py-2 text-xs text-muted-foreground">
+                              <div className="col-span-4">Sesión</div>
+                              <div className="col-span-2">Estado</div>
+                              <div className="col-span-2">Enviados</div>
+                              <div className="col-span-2">Última actividad</div>
+                              <div className="col-span-2 text-right">Acciones</div>
+                            </div>
+                            {limitedSessions.map(renderSessionRow)}
                           </div>
                         )}
                       </div>
@@ -1251,6 +1305,12 @@ export default function Sessions() {
                         </div>
                         <div className="col-span-2">
                           Motivo ajuste: {detailsSession.limitChangeReason ?? "-"}
+                        </div>
+                        <div className="col-span-2">
+                          Limitada hasta: {formatDateTime(detailsSession.limitedUntil ?? null)}
+                        </div>
+                        <div className="col-span-2">
+                          Motivo límite: {detailsSession.limitedReason ?? "-"}
                         </div>
                       </div>
                       <div className="mt-3 flex items-center justify-end gap-2">

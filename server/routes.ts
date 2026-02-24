@@ -353,6 +353,9 @@ export async function registerRoutes(
       await storage.updateSession(sessionId, {
         status: "reconnecting",
         qrCode: null,
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
       });
 
       await withTimeout(
@@ -366,6 +369,9 @@ export async function registerRoutes(
         qrCode: null,
         reconnectCount: (session.reconnectCount ?? 0) + 1,
         lastReconnectAt: reconnectAt,
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
       });
 
       await withTimeout(
@@ -380,6 +386,9 @@ export async function registerRoutes(
 
       await storage.updateSession(sessionId, {
         status: nextStatus,
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
       });
 
       await storage.createSystemLog({
@@ -796,6 +805,9 @@ export async function registerRoutes(
         },
         lastLimitUpdateAt: null,
         limitChangeReason: null,
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
       });
       
       await whatsappManager.createSession(session.id);
@@ -1034,7 +1046,12 @@ export async function registerRoutes(
         const nextStatus = /auth/i.test(message) ? "auth_failed" : "disconnected";
         console.error(`[routes][sessions][${sessionId}] reset-auth failed:`, message);
 
-        await storage.updateSession(sessionId, { status: nextStatus });
+        await storage.updateSession(sessionId, {
+          status: nextStatus,
+          limitedUntil: null,
+          limitedScope: null,
+          limitedReason: null,
+        });
         await whatsappManager.recomputeSessionHealth(sessionId, {
           forceCooldown: true,
           strikeReason: "reset_auth_failed_route",
@@ -2917,7 +2934,7 @@ export async function registerRoutes(
         return res.status(healthGuard.status).json(healthGuard.body);
       }
 
-      if (session.status !== 'connected') {
+      if (!["connected", "limited"].includes(session.status)) {
         return res.status(400).json({ error: "Session is not connected" });
       }
 

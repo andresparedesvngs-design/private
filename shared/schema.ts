@@ -60,6 +60,9 @@ export const insertSessionSchema = z.object({
     }),
   lastLimitUpdateAt: z.date().optional().nullable(),
   limitChangeReason: z.string().optional().nullable(),
+  limitedUntil: z.date().optional().nullable(),
+  limitedScope: z.enum(["minute", "hour", "day"]).optional().nullable(),
+  limitedReason: z.string().optional().nullable(),
 });
 
 export const insertProxyServerSchema = z.object({
@@ -273,6 +276,9 @@ const sessionSchema = new mongoose.Schema({
   },
   lastLimitUpdateAt: { type: Date, default: null },
   limitChangeReason: { type: String, default: null },
+  limitedUntil: { type: Date, default: null },
+  limitedScope: { type: String, enum: ["minute", "hour", "day"], default: null },
+  limitedReason: { type: String, default: null },
 }, { timestamps: true });
 
 const proxyServerSchema = new mongoose.Schema({
@@ -527,6 +533,9 @@ export type Session = BaseDocument & {
   };
   lastLimitUpdateAt?: Date | null;
   limitChangeReason?: string | null;
+  limitedUntil?: Date | null;
+  limitedScope?: "minute" | "hour" | "day" | null;
+  limitedReason?: string | null;
 };
 
 export type InsertProxyServer = z.infer<typeof insertProxyServerSchema>;

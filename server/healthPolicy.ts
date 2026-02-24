@@ -321,10 +321,13 @@ export const computeSessionHealth = (
     healthStatus = "warning";
     healthScore = 60;
     healthReason = "Session requires manual observation";
-  } else if (hasStatus(sessionStatus, ["disconnected", "auth_failed"])) {
+  } else if (hasStatus(sessionStatus, ["disconnected", "auth_failed", "limited"])) {
     healthStatus = "warning";
     healthScore = 50;
-    healthReason = "Session is not connected";
+    healthReason =
+      sessionStatus === "limited"
+        ? "Session temporarily limited by send quota"
+        : "Session is not connected";
   }
 
   return {

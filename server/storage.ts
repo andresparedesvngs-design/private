@@ -404,6 +404,9 @@ export class MongoStorage implements IStorage {
       },
       lastLimitUpdateAt: obj.lastLimitUpdateAt ?? null,
       limitChangeReason: obj.limitChangeReason ?? null,
+      limitedUntil: obj.limitedUntil ?? null,
+      limitedScope: obj.limitedScope ?? null,
+      limitedReason: obj.limitedReason ?? null,
       createdAt: obj.createdAt,
       updatedAt: obj.updatedAt
     };

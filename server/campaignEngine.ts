@@ -1346,6 +1346,27 @@ class CampaignEngine {
               );
 
               if (!recovered) {
+                const waited = await this.waitForAnyConnectedSessions(
+                  campaignId,
+                  pool,
+                  "no_connected_sessions_wait",
+                  debtor.id,
+                  1
+                );
+                if (waited) {
+                  attemptedSessionIds.length = 0;
+                  availableSessions = await this.getSendReadySessions(
+                    campaignId,
+                    pool,
+                    "post_wait_recovery",
+                    attemptedSessionIds,
+                    debtor.id
+                  );
+                  if (availableSessions.length > 0) {
+                    continue;
+                  }
+                }
+
                 if (!smsEnabled) {
                   await this.pauseCampaignNoSessions(campaignId);
                   return;
@@ -1417,6 +1438,58 @@ class CampaignEngine {
               attemptedSessionIds,
               debtor.id
             );
+
+            if (error?.rateLimited && remainingSessions.length > 0) {
+              await storage.createSystemLog({
+                level: "warn",
+                source: "campaign",
+                message: `Session ${nextSessionId} reached send quota. Retrying with another session.`,
+                metadata: {
+                  campaignId,
+                  debtorId: debtor.id,
+                  sessionId: nextSessionId,
+                  retryAfterMs: error?.retryAfterMs ?? null,
+                  limitScope: error?.limitScope ?? null,
+                  attemptedSessionIds,
+                },
+              });
+              continue;
+            }
+
+            if (error?.rateLimited) {
+              const recoveredAfterWait = await this.waitForAnyConnectedSessions(
+                campaignId,
+                pool,
+                "rate_limited_wait",
+                debtor.id,
+                1
+              );
+              if (recoveredAfterWait) {
+                attemptedSessionIds.length = 0;
+                continue;
+              }
+
+              if (!smsEnabled) {
+                await this.pauseCampaignNoSessions(campaignId);
+                return;
+              }
+
+              await storage.createSystemLog({
+                level: "warn",
+                source: "campaign",
+                message: "All WhatsApp sessions are rate limited. Falling back to SMS.",
+                metadata: {
+                  campaignId,
+                  debtorId: debtor.id,
+                  sessionId: nextSessionId,
+                  retryAfterMs: error?.retryAfterMs ?? null,
+                  limitScope: error?.limitScope ?? null,
+                  attemptedSessionIds,
+                },
+              });
+              canUseWhatsapp = false;
+              break;
+            }
 
             if (error?.retryable && remainingSessions.length > 0) {
               await this.removeSessionFromPool(
@@ -2093,6 +2166,25 @@ class CampaignEngine {
     );
   }
 
+  private isSessionRateLimitedError(error: any): boolean {
+    const code = String(error?.code ?? "").toLowerCase();
+    if (code === "rate_limited") {
+      return true;
+    }
+
+    const message = String(error?.message ?? "").toLowerCase();
+    if (!message) {
+      return false;
+    }
+
+    return (
+      message.includes("per-minute rate limit reached") ||
+      message.includes("hourly send limit reached") ||
+      message.includes("daily send limit reached") ||
+      message.includes("session is temporarily limited")
+    );
+  }
+
   private parsePositiveInt(value: unknown): number | null {
     if (value === null || value === undefined) return null;
     const parsed = Math.floor(Number(value));
@@ -2310,6 +2402,7 @@ class CampaignEngine {
 
       return { success: true, messageId: result.messageId };
     } catch (error: any) {
+      const rateLimited = this.isSessionRateLimitedError(error);
       const retryable = this.isSessionUnavailableError(error);
       await storage.createSystemLog({
         level: 'error',
@@ -2319,9 +2412,21 @@ class CampaignEngine {
           debtorId: debtor.id,
           sessionId,
           error: error.message,
+          errorCode: error?.code ?? null,
+          rateLimited,
+          retryAfterMs: error?.retryAfterMs ?? null,
+          limitScope: error?.limitScope ?? null,
           retryable,
         }
       });
+
+      if (rateLimited) {
+        const wrapped = new Error(error?.message ?? "Session rate limited");
+        (wrapped as any).rateLimited = true;
+        (wrapped as any).retryAfterMs = error?.retryAfterMs ?? null;
+        (wrapped as any).limitScope = error?.limitScope ?? null;
+        throw wrapped;
+      }
 
       if (retryable) {
         const wrapped = new Error(error?.message ?? "Session unavailable");

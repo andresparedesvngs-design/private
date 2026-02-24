@@ -33,6 +33,9 @@ export interface WhatsAppClient {
   lastVerifiedAt?: Date;
   lastVerifiedOk?: boolean;
   lastVerifyError?: string;
+  limitedUntil?: Date;
+  limitedScope?: "minute" | "hour" | "day";
+  limitedReason?: string;
 }
 
 export type VerifyNowResult = {
@@ -228,6 +231,164 @@ class WhatsAppManager {
     if (!value) return null;
     const date = value instanceof Date ? value : new Date(String(value));
     return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  private getRateLimitFallbackMs(scope?: "minute" | "hour" | "day"): number {
+    if (scope === "day") return 24 * 60 * 60 * 1000;
+    if (scope === "hour") return 60 * 60 * 1000;
+    return 60 * 1000;
+  }
+
+  private getRateLimitRetryAfterMs(args: {
+    retryAfterMs?: number;
+    scope?: "minute" | "hour" | "day";
+  }): number {
+    const value = Number(args.retryAfterMs);
+    if (Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+    return this.getRateLimitFallbackMs(args.scope);
+  }
+
+  private getSessionRateLimitState(
+    whatsappClient: WhatsAppClient,
+    nowMs = Date.now()
+  ): {
+    active: boolean;
+    limitedUntil: Date | null;
+    retryAfterMs: number;
+    limitScope: "minute" | "hour" | "day";
+    reason: string;
+  } | null {
+    if (whatsappClient.status !== "limited") {
+      return null;
+    }
+
+    const scope = whatsappClient.limitedScope ?? "minute";
+    const limitedUntil = this.toValidDate(whatsappClient.limitedUntil);
+    if (!limitedUntil) {
+      return null;
+    }
+
+    const retryAfterMs = Math.max(0, limitedUntil.getTime() - nowMs);
+    return {
+      active: retryAfterMs > 0,
+      limitedUntil,
+      retryAfterMs,
+      limitScope: scope,
+      reason: whatsappClient.limitedReason ?? "rate_limited",
+    };
+  }
+
+  private async clearSessionRateLimitState(
+    sessionId: string,
+    whatsappClient: WhatsAppClient
+  ): Promise<void> {
+    const changed =
+      whatsappClient.status === "limited" ||
+      Boolean(whatsappClient.limitedUntil) ||
+      Boolean(whatsappClient.limitedScope) ||
+      Boolean(whatsappClient.limitedReason);
+
+    whatsappClient.limitedUntil = undefined;
+    whatsappClient.limitedScope = undefined;
+    whatsappClient.limitedReason = undefined;
+    if (whatsappClient.status === "limited") {
+      whatsappClient.status = "connected";
+    }
+
+    if (!changed) {
+      return;
+    }
+
+    await storage.updateSession(sessionId, {
+      status: "connected",
+      limitedUntil: null,
+      limitedScope: null,
+      limitedReason: null,
+      lastActive: new Date(),
+    });
+
+    if (this.io) {
+      this.io.emit("session:updated", { id: sessionId });
+    }
+  }
+
+  private async throwIfSessionRateLimited(
+    sessionId: string,
+    whatsappClient: WhatsAppClient
+  ): Promise<void> {
+    const rateLimit = this.getSessionRateLimitState(whatsappClient);
+    if (!rateLimit) {
+      if (whatsappClient.status === "limited") {
+        await this.clearSessionRateLimitState(sessionId, whatsappClient);
+      }
+      return;
+    }
+
+    if (!rateLimit.active) {
+      await this.clearSessionRateLimitState(sessionId, whatsappClient);
+      return;
+    }
+
+    throw new WhatsAppSendPolicyError({
+      code: "rate_limited",
+      message: "Session is temporarily limited",
+      retryAfterMs: rateLimit.retryAfterMs,
+      limitScope: rateLimit.limitScope,
+    });
+  }
+
+  private async markSessionRateLimited(
+    sessionId: string,
+    whatsappClient: WhatsAppClient,
+    error: WhatsAppSendPolicyError
+  ): Promise<void> {
+    if (error.code !== "rate_limited") {
+      return;
+    }
+
+    const now = new Date();
+    const retryAfterMs = this.getRateLimitRetryAfterMs({
+      retryAfterMs: error.retryAfterMs,
+      scope: error.limitScope,
+    });
+    const limitedUntil = new Date(now.getTime() + retryAfterMs);
+    const limitScope = error.limitScope ?? "minute";
+    const limitReason = error.message ?? "rate_limited";
+
+    whatsappClient.status = "limited";
+    whatsappClient.limitedUntil = limitedUntil;
+    whatsappClient.limitedScope = limitScope;
+    whatsappClient.limitedReason = limitReason;
+    whatsappClient.lastVerifiedAt = now;
+    whatsappClient.lastVerifiedOk = true;
+    whatsappClient.lastVerifyError = undefined;
+
+    await storage.updateSession(sessionId, {
+      status: "limited",
+      limitedUntil,
+      limitedScope: limitScope,
+      limitedReason: limitReason,
+      lastActive: now,
+    });
+
+    await storage.createSystemLog({
+      level: "warning",
+      source: "whatsapp",
+      message: `Session ${sessionId} temporarily limited (${limitScope})`,
+      metadata: {
+        sessionId,
+        limitScope,
+        retryAfterMs,
+        limitedUntil: limitedUntil.toISOString(),
+        reason: limitReason,
+      },
+    });
+
+    if (this.io) {
+      this.io.emit("session:updated", { id: sessionId });
+    }
   }
 
   private isSpamLikeReason(reason?: string | null): boolean {
@@ -894,12 +1055,18 @@ class WhatsAppManager {
           qrCode: null,
           reconnectCount: (session.reconnectCount ?? 0) + 1,
           lastReconnectAt: startedAt,
+          limitedUntil: null,
+          limitedScope: null,
+          limitedReason: null,
         });
 
         await this.destroySession(sessionId);
         await storage.updateSession(sessionId, {
           status: "initializing",
           qrCode: null,
+          limitedUntil: null,
+          limitedScope: null,
+          limitedReason: null,
         });
         await this.createSession(sessionId);
       } catch (error: any) {
@@ -970,7 +1137,7 @@ class WhatsAppManager {
   private syncPollingForSessions() {
     const enabled = this.getPollingEnabled();
     this.clients.forEach((client, sessionId) => {
-      if (client.status !== "connected") {
+      if (client.status !== "connected" && client.status !== "limited") {
         this.stopIncomingPolling(sessionId);
         return;
       }
@@ -1105,6 +1272,9 @@ class WhatsAppManager {
     whatsappClient.lastVerifiedAt = disconnectedAt;
     whatsappClient.lastVerifiedOk = false;
     whatsappClient.lastVerifyError = errorMessage ?? reason;
+    whatsappClient.limitedUntil = undefined;
+    whatsappClient.limitedScope = undefined;
+    whatsappClient.limitedReason = undefined;
 
     this.clearQrWindow(sessionId);
     this.stopIncomingPolling(sessionId);
@@ -1115,6 +1285,9 @@ class WhatsAppManager {
       disconnectCount: (persistedSession?.disconnectCount ?? 0) + 1,
       lastDisconnectAt: disconnectedAt,
       lastDisconnectReason: errorMessage ?? reason,
+      limitedUntil: null,
+      limitedScope: null,
+      limitedReason: null,
     });
     await this.recomputeSessionHealth(sessionId, {
       forceCooldown: this.isSpamLikeReason(reason) || this.isSpamLikeReason(errorMessage),
@@ -1182,10 +1355,33 @@ class WhatsAppManager {
     sessionId: string,
     client: any,
     whatsappClient: WhatsAppClient,
-    options?: { stateGetter?: () => Promise<string | null> }
+    options?: { stateGetter?: () => Promise<string | null>; allowLimited?: boolean }
   ): Promise<{ ok: boolean; error?: string }> {
     const now = new Date();
+    const nowMs = now.getTime();
     const getState = options?.stateGetter ?? (() => client.getState());
+    const allowLimited = options?.allowLimited === true;
+
+    const rateLimitState = this.getSessionRateLimitState(whatsappClient, nowMs);
+    const keepLimited = Boolean(rateLimitState?.active);
+    if (rateLimitState) {
+      if (rateLimitState.active) {
+        if (allowLimited) {
+          // Keep current limited status, but continue state validation.
+        } else {
+          return {
+            ok: false,
+            error: `rate_limited_${rateLimitState.limitScope}`,
+          };
+        }
+      }
+      if (!rateLimitState.active) {
+        await this.clearSessionRateLimitState(sessionId, whatsappClient);
+      }
+    } else if (whatsappClient.status === "limited") {
+      await this.clearSessionRateLimitState(sessionId, whatsappClient);
+    }
+
     try {
       const state = await getState();
       if (state !== "CONNECTED") {
@@ -1199,21 +1395,30 @@ class WhatsAppManager {
         return { ok: false, error };
       }
 
-      const wasConnected = whatsappClient.status === "connected";
-      whatsappClient.status = "connected";
-      whatsappClient.lastVerifiedAt = now;
-      whatsappClient.lastVerifiedOk = true;
-      whatsappClient.lastVerifyError = undefined;
+      if (keepLimited) {
+        whatsappClient.lastVerifiedAt = now;
+        whatsappClient.lastVerifiedOk = true;
+        whatsappClient.lastVerifyError = undefined;
+      } else {
+        const wasConnected = whatsappClient.status === "connected";
+        whatsappClient.status = "connected";
+        whatsappClient.lastVerifiedAt = now;
+        whatsappClient.lastVerifiedOk = true;
+        whatsappClient.lastVerifyError = undefined;
 
-      await storage.updateSession(sessionId, {
-        status: "connected",
-        lastActive: now,
-      });
+        await storage.updateSession(sessionId, {
+          status: "connected",
+          lastActive: now,
+          limitedUntil: null,
+          limitedScope: null,
+          limitedReason: null,
+        });
 
-      if (!wasConnected) {
-        this.startIncomingPolling(sessionId, client);
-        if (this.io) {
-          this.io.emit("session:updated", { id: sessionId });
+        if (!wasConnected) {
+          this.startIncomingPolling(sessionId, client);
+          if (this.io) {
+            this.io.emit("session:updated", { id: sessionId });
+          }
         }
       }
 
@@ -1262,7 +1467,8 @@ class WhatsAppManager {
         const verified = await this.verifyConnectedState(
           sessionId,
           client,
-          sessionClient
+          sessionClient,
+          { allowLimited: true }
         );
         if (!verified.ok) {
           polling = false;
@@ -1622,12 +1828,18 @@ class WhatsAppManager {
       whatsappClient.lastVerifiedAt = new Date();
       whatsappClient.lastVerifiedOk = true;
       whatsappClient.lastVerifyError = undefined;
+      whatsappClient.limitedUntil = undefined;
+      whatsappClient.limitedScope = undefined;
+      whatsappClient.limitedReason = undefined;
 
       await storage.updateSession(sessionId, {
         status: 'connected',
         phoneNumber: phoneNumber ?? undefined,
         qrCode: null,
-        lastActive: new Date()
+        lastActive: new Date(),
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
       });
       await this.recomputeSessionHealth(sessionId);
 
@@ -1693,7 +1905,10 @@ class WhatsAppManager {
         await storage.updateSession(sessionId, {
           status: 'authenticated',
           qrCode: null,
-          lastActive: new Date()
+          lastActive: new Date(),
+          limitedUntil: null,
+          limitedScope: null,
+          limitedReason: null,
         });
 
         if (this.io) {
@@ -1778,6 +1993,9 @@ class WhatsAppManager {
         status: 'auth_failed',
         authFailureCount: (sessionSnapshot?.authFailureCount ?? 0) + 1,
         lastAuthFailureAt: new Date(),
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
       });
       await this.recomputeSessionHealth(sessionId, {
         forceCooldown: true,
@@ -1964,7 +2182,10 @@ class WhatsAppManager {
       }
        
       await storage.updateSession(sessionId, {
-        status: 'disconnected'
+        status: 'disconnected',
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
       });
       
       await storage.createSystemLog({
@@ -1997,6 +2218,9 @@ class WhatsAppManager {
       await storage.updateSession(sessionId, {
         status: "reconnecting",
         qrCode: null,
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
       });
 
       await this.runWithTimeout(
@@ -2023,6 +2247,9 @@ class WhatsAppManager {
         qrCode: null,
         resetAuthCount: (session.resetAuthCount ?? 0) + 1,
         lastResetAuthAt: resetAt,
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
       });
 
       await this.runWithTimeout(
@@ -2042,7 +2269,12 @@ class WhatsAppManager {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`[wa][${sessionId}] resetSessionAuth error:`, message);
-      await storage.updateSession(sessionId, { status: "auth_failed" });
+      await storage.updateSession(sessionId, {
+        status: "auth_failed",
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
+      });
       await this.recomputeSessionHealth(sessionId, {
         forceCooldown: true,
         strikeReason: "reset_auth_failed",
@@ -2067,6 +2299,8 @@ class WhatsAppManager {
     if (!whatsappClient) {
       throw new Error('Session not found');
     }
+
+    await this.throwIfSessionRateLimited(sessionId, whatsappClient);
 
     if (whatsappClient.status !== 'connected') {
       throw new Error('Session not connected');
@@ -2184,6 +2418,9 @@ class WhatsAppManager {
       return { messageId: messageId ?? undefined };
     } catch (error: any) {
       if (error instanceof WhatsAppSendPolicyError) {
+        if (error.code === "rate_limited") {
+          await this.markSessionRateLimited(sessionId, whatsappClient, error);
+        }
         throw error;
       }
       if (error instanceof WhatsAppSessionNotReadyError) {
@@ -2421,7 +2658,20 @@ class WhatsAppManager {
 
   isSessionConnected(sessionId: string): boolean {
     const client = this.clients.get(sessionId);
-    return client?.status === 'connected' || false;
+    if (!client) {
+      return false;
+    }
+    if (client.status === "connected") {
+      return true;
+    }
+    if (client.status !== "limited") {
+      return false;
+    }
+    const rateLimitState = this.getSessionRateLimitState(client);
+    if (!rateLimitState) {
+      return true;
+    }
+    return !rateLimitState.active;
   }
 
   async restoreSessions(): Promise<void> {
@@ -2432,13 +2682,16 @@ class WhatsAppManager {
 
     for (const session of sessions) {
       try {
-        // Solo restaurar sesiones que estaban conectadas
-        if (session.status === 'connected') {
-          console.log('Attempting to restore connected session:', session.id);
+        // Restaurar sesiones activas (incluye limitadas temporales).
+        if (session.status === "connected" || session.status === "limited") {
+          console.log("Attempting to restore active session:", session.id);
           
           await storage.updateSession(session.id, {
             status: 'reconnecting',
-            qrCode: null
+            qrCode: null,
+            limitedUntil: null,
+            limitedScope: null,
+            limitedReason: null,
           });
           
           await this.createSession(session.id);

@@ -1,7 +1,13 @@
 
 import { addDays, subDays, subHours } from "date-fns";
 
-export type SessionStatus = 'connected' | 'disconnected' | 'qr_ready' | 'initializing' | 'auth_failed';
+export type SessionStatus =
+  | 'connected'
+  | 'disconnected'
+  | 'qr_ready'
+  | 'initializing'
+  | 'auth_failed'
+  | 'limited';
 
 export interface WhatsAppSession {
   id: string;
