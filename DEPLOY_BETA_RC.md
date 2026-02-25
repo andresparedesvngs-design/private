@@ -18,6 +18,25 @@ El script:
 - crea `WWEBJS_AUTH_DIR` y `logs/pm2`
 - ejecuta `npm ci`, `npm run build`, `pm2 start/reload` y health check
 
+## 0.1) Deploy rapido (sin `npm ci` salvo cambios de dependencias)
+
+```bash
+cd /var/www/paredes_devs/WHS
+bash script/deploy-fast.sh
+```
+
+El script rapido:
+- hace `git pull --ff-only origin main`
+- ejecuta `npm ci` solo si falta `node_modules` o si el pull trajo cambios en `package.json`/`package-lock.json`
+- ejecuta `npm run build`, `pm2 reload/start`, `pm2 save` y health check
+
+Variables opcionales:
+- `DEPLOY_INSTALL_MODE=auto|always|never` (default: `auto`)
+- `DEPLOY_REMOTE` (default: `origin`)
+- `DEPLOY_BRANCH` (default: `main`)
+- `PM2_APP_NAME` (default: `whs-beta-rc`)
+- `DEPLOY_HEALTH_URL` (default: `http://127.0.0.1:5000/api/health`)
+
 ## 1) Requisitos del servidor
 
 ```bash

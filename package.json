@@ -10,6 +10,7 @@
     "start": "cross-env NODE_ENV=production node dist/index.cjs",
     "start:prod": "cross-env NODE_ENV=production node dist/index.cjs",
     "deploy:beta-rc": "bash script/deploy-beta-rc.sh",
+    "deploy:beta-rc:fast": "bash script/deploy-fast.sh",
     "check": "tsc",
     "test": "vitest"
   },
