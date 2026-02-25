@@ -23,9 +23,18 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Plus, RefreshCw, Power, Pencil } from "lucide-react";
+import {
+  Loader2,
+  Plus,
+  RefreshCw,
+  Power,
+  Pencil,
+  ChevronDown,
+  ChevronRight,
+} from "lucide-react";
 import {
   useAuthMe,
+  useSessions,
   useProxyServers,
   useCreateProxyServer,
   useUpdateProxyServer,
@@ -40,6 +49,7 @@ export default function ProxyServers() {
   const isAdmin = me?.role === "admin";
   const { toast } = useToast();
   const { data: proxies, isLoading } = useProxyServers(isAdmin);
+  const { data: sessions, isLoading: isSessionsLoading } = useSessions(isAdmin);
   const createProxy = useCreateProxyServer();
   const updateProxy = useUpdateProxyServer();
   const disableProxy = useDisableProxyServer();
@@ -57,7 +67,37 @@ export default function ProxyServers() {
   const [editPort, setEditPort] = useState("1080");
   const [editEnabled, setEditEnabled] = useState(true);
 
+  const [showConnectedProxies, setShowConnectedProxies] = useState(true);
+  const [showDisconnectedProxies, setShowDisconnectedProxies] = useState(true);
+
   const list = useMemo(() => proxies ?? [], [proxies]);
+  const sessionList = useMemo(() => sessions ?? [], [sessions]);
+
+  const proxySessionStats = useMemo(() => {
+    const stats = new Map<string, { total: number; connected: number }>();
+
+    for (const session of sessionList) {
+      if (!session.proxyServerId) continue;
+      const current = stats.get(session.proxyServerId) ?? { total: 0, connected: 0 };
+      current.total += 1;
+      if (session.status === "connected") {
+        current.connected += 1;
+      }
+      stats.set(session.proxyServerId, current);
+    }
+
+    return stats;
+  }, [sessionList]);
+
+  const connectedProxies = useMemo(
+    () => list.filter((proxy) => ["online", "degraded"].includes(proxy.status)),
+    [list]
+  );
+
+  const disconnectedProxies = useMemo(
+    () => list.filter((proxy) => proxy.status === "offline"),
+    [list]
+  );
 
   const openEdit = (proxy: any) => {
     setEditingId(proxy.id);
@@ -79,7 +119,7 @@ export default function ProxyServers() {
     const port = Number(createPort);
     if (!Number.isFinite(port) || port <= 0 || port > 65535) {
       toast({
-        title: "Puerto inválido",
+        title: "Puerto invalido",
         description: "El puerto debe estar entre 1 y 65535.",
         variant: "destructive",
       });
@@ -119,7 +159,7 @@ export default function ProxyServers() {
     }
     if (!Number.isFinite(port) || port <= 0 || port > 65535) {
       toast({
-        title: "Puerto inválido",
+        title: "Puerto invalido",
         description: "El puerto debe estar entre 1 y 65535.",
         variant: "destructive",
       });
@@ -147,7 +187,7 @@ export default function ProxyServers() {
   };
 
   const handleDisable = async (id: string) => {
-    if (!confirm("¿Deshabilitar este proxy?")) return;
+    if (!confirm("Deseas deshabilitar este proxy?")) return;
     try {
       await disableProxy.mutateAsync(id);
     } catch (error: any) {
@@ -193,13 +233,121 @@ export default function ProxyServers() {
     return <Badge variant="outline" className="text-muted-foreground">Offline</Badge>;
   };
 
+  const renderProxyRows = (proxiesToRender: typeof list) => {
+    if (!proxiesToRender.length) {
+      return (
+        <TableRow>
+          <TableCell colSpan={8} className="text-center text-muted-foreground">
+            No hay proxies en esta seccion.
+          </TableCell>
+        </TableRow>
+      );
+    }
+
+    return proxiesToRender.map((proxy) => {
+      const stats = proxySessionStats.get(proxy.id) ?? { total: 0, connected: 0 };
+      const disconnected = Math.max(stats.total - stats.connected, 0);
+
+      return (
+        <TableRow key={proxy.id}>
+          <TableCell className="font-medium">{proxy.name}</TableCell>
+          <TableCell className="font-mono text-xs">
+            {proxy.scheme}://{proxy.host}:{proxy.port}
+          </TableCell>
+          <TableCell className="space-y-1">
+            {renderStatus(proxy.status)}
+            {!proxy.enabled && (
+              <div className="text-xs text-muted-foreground">Deshabilitado</div>
+            )}
+          </TableCell>
+          <TableCell className="text-xs">
+            {isSessionsLoading ? (
+              <span className="text-muted-foreground">Calculando...</span>
+            ) : (
+              <div className="space-y-1">
+                <div>
+                  Conectadas: <span className="font-medium">{stats.connected}</span>
+                </div>
+                <div className="text-muted-foreground">
+                  Desconectadas: {disconnected} · Total: {stats.total}
+                </div>
+              </div>
+            )}
+          </TableCell>
+          <TableCell className="font-mono text-xs">{proxy.lastPublicIp ?? "-"}</TableCell>
+          <TableCell className="text-xs">{proxy.latencyMs ? `${proxy.latencyMs} ms` : "-"}</TableCell>
+          <TableCell className="text-xs text-muted-foreground">
+            {proxy.lastCheckAt ? new Date(proxy.lastCheckAt).toLocaleString() : "-"}
+          </TableCell>
+          <TableCell className="text-right">
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1"
+                onClick={() => handleCheck(proxy.id)}
+                disabled={checkProxy.isPending}
+              >
+                <RefreshCw className="h-3 w-3" />
+                Check
+              </Button>
+              <Button variant="outline" size="sm" className="gap-1" onClick={() => openEdit(proxy)}>
+                <Pencil className="h-3 w-3" />
+                Editar
+              </Button>
+              {proxy.enabled ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1"
+                  onClick={() => handleDisable(proxy.id)}
+                >
+                  <Power className="h-3 w-3" />
+                  Deshabilitar
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1"
+                  onClick={() => handleEnable(proxy.id)}
+                >
+                  <Power className="h-3 w-3" />
+                  Habilitar
+                </Button>
+              )}
+            </div>
+          </TableCell>
+        </TableRow>
+      );
+    });
+  };
+
+  const renderProxyTable = (proxiesToRender: typeof list) => {
+    return (
+      <Table>
+        <TableHeader>
+          <TableRow className="bg-muted/50 hover:bg-muted/50">
+            <TableHead>Nombre</TableHead>
+            <TableHead>Endpoint</TableHead>
+            <TableHead>Estado</TableHead>
+            <TableHead>Sesiones</TableHead>
+            <TableHead>IP publica</TableHead>
+            <TableHead>Latencia</TableHead>
+            <TableHead>Ultimo check</TableHead>
+            <TableHead className="text-right">Acciones</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>{renderProxyRows(proxiesToRender)}</TableBody>
+      </Table>
+    );
+  };
+
   if (!isAdmin) {
     return (
       <Layout>
         <Card>
-          <CardContent className="p-6 text-sm text-muted-foreground">
-            No autorizado.
-          </CardContent>
+          <CardContent className="p-6 text-sm text-muted-foreground">No autorizado.</CardContent>
         </Card>
       </Layout>
     );
@@ -232,7 +380,11 @@ export default function ProxyServers() {
                 </div>
                 <div className="space-y-2">
                   <Label>Host</Label>
-                  <Input value={createHost} onChange={(e) => setCreateHost(e.target.value)} placeholder="172.16.55.83" />
+                  <Input
+                    value={createHost}
+                    onChange={(e) => setCreateHost(e.target.value)}
+                    placeholder="172.16.55.83"
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label>Puerto</Label>
@@ -244,7 +396,9 @@ export default function ProxyServers() {
                 </div>
               </div>
               <DialogFooter>
-                <Button variant="ghost" onClick={() => setIsCreateOpen(false)}>Cancelar</Button>
+                <Button variant="ghost" onClick={() => setIsCreateOpen(false)}>
+                  Cancelar
+                </Button>
                 <Button onClick={handleCreate} disabled={createProxy.isPending}>
                   {createProxy.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
                   Crear
@@ -258,102 +412,67 @@ export default function ProxyServers() {
           <CardHeader>
             <CardTitle>Proxies</CardTitle>
           </CardHeader>
-          <CardContent className="p-0">
+          <CardContent className="space-y-4">
             {isLoading ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="h-6 w-6 animate-spin text-primary" />
               </div>
+            ) : !list.length ? (
+              <div className="text-center text-muted-foreground py-6">No hay proxies registrados.</div>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-muted/50 hover:bg-muted/50">
-                    <TableHead>Nombre</TableHead>
-                    <TableHead>Endpoint</TableHead>
-                    <TableHead>Estado</TableHead>
-                    <TableHead>IP pública</TableHead>
-                    <TableHead>Latencia</TableHead>
-                    <TableHead>Último check</TableHead>
-                    <TableHead className="text-right">Acciones</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {!list.length ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="text-center text-muted-foreground">
-                        No hay proxies registrados.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    list.map((proxy) => (
-                      <TableRow key={proxy.id}>
-                        <TableCell className="font-medium">{proxy.name}</TableCell>
-                        <TableCell className="font-mono text-xs">
-                          {proxy.scheme}://{proxy.host}:{proxy.port}
-                        </TableCell>
-                        <TableCell className="space-y-1">
-                          {renderStatus(proxy.status)}
-                          {!proxy.enabled && (
-                            <div className="text-xs text-muted-foreground">Deshabilitado</div>
-                          )}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs">
-                          {proxy.lastPublicIp ?? "-"}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {proxy.latencyMs ? `${proxy.latencyMs} ms` : "-"}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {proxy.lastCheckAt ? new Date(proxy.lastCheckAt).toLocaleString() : "-"}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-2">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="gap-1"
-                              onClick={() => handleCheck(proxy.id)}
-                              disabled={checkProxy.isPending}
-                            >
-                              <RefreshCw className="h-3 w-3" />
-                              Check
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="gap-1"
-                              onClick={() => openEdit(proxy)}
-                            >
-                              <Pencil className="h-3 w-3" />
-                              Editar
-                            </Button>
-                            {proxy.enabled ? (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="gap-1"
-                                onClick={() => handleDisable(proxy.id)}
-                              >
-                                <Power className="h-3 w-3" />
-                                Deshabilitar
-                              </Button>
-                            ) : (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="gap-1"
-                                onClick={() => handleEnable(proxy.id)}
-                              >
-                                <Power className="h-3 w-3" />
-                                Habilitar
-                              </Button>
-                            )}
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
+              <>
+                <div className="rounded-lg border border-emerald-200">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-emerald-100 bg-emerald-50/60">
+                    <Button
+                      variant="ghost"
+                      className="h-auto p-0 font-medium hover:bg-transparent"
+                      onClick={() => setShowConnectedProxies((value) => !value)}
+                    >
+                      {showConnectedProxies ? (
+                        <ChevronDown className="h-4 w-4 mr-2" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 mr-2" />
+                      )}
+                      Conectados ({connectedProxies.length})
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-muted-foreground"
+                      onClick={() => setShowConnectedProxies((value) => !value)}
+                    >
+                      {showConnectedProxies ? "Ocultar" : "Mostrar"}
+                    </Button>
+                  </div>
+                  {showConnectedProxies && renderProxyTable(connectedProxies)}
+                </div>
+
+                <div className="rounded-lg border border-slate-200">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-slate-50/70">
+                    <Button
+                      variant="ghost"
+                      className="h-auto p-0 font-medium hover:bg-transparent"
+                      onClick={() => setShowDisconnectedProxies((value) => !value)}
+                    >
+                      {showDisconnectedProxies ? (
+                        <ChevronDown className="h-4 w-4 mr-2" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 mr-2" />
+                      )}
+                      Desconectados ({disconnectedProxies.length})
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-muted-foreground"
+                      onClick={() => setShowDisconnectedProxies((value) => !value)}
+                    >
+                      {showDisconnectedProxies ? "Ocultar" : "Mostrar"}
+                    </Button>
+                  </div>
+                  {showDisconnectedProxies && renderProxyTable(disconnectedProxies)}
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
@@ -384,7 +503,9 @@ export default function ProxyServers() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setEditingId(null)}>Cancelar</Button>
+            <Button variant="ghost" onClick={() => setEditingId(null)}>
+              Cancelar
+            </Button>
             <Button onClick={handleSaveEdit} disabled={updateProxy.isPending}>
               {updateProxy.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
               Guardar cambios
