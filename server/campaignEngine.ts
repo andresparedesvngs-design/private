@@ -504,6 +504,20 @@ class CampaignEngine {
     return Math.min(Math.max(safe, 1), 5);
   }
 
+  private getCampaignPreverifyFullPool(): boolean {
+    const envValue = this.parseBooleanEnv(process.env.CAMPAIGN_PREVERIFY_FULL_POOL);
+    if (envValue !== null) {
+      return envValue;
+    }
+    return true;
+  }
+
+  private getCampaignPreverifyConcurrency(): number {
+    const envValue = this.parsePositiveIntEnv(process.env.CAMPAIGN_PREVERIFY_CONCURRENCY);
+    const safe = envValue ?? 4;
+    return Math.min(Math.max(safe, 1), 20);
+  }
+
   private getCampaignPauseEnabled(): boolean {
     if (this.campaignPauseEnabledOverride !== null) {
       return this.campaignPauseEnabledOverride;
@@ -1903,23 +1917,35 @@ class CampaignEngine {
       return verified;
     }
 
+    const verifyConnectedBatch = async (sessionIds: string[]): Promise<number> => {
+      const concurrency = this.getCampaignPreverifyConcurrency();
+      let recoveredCount = 0;
+
+      for (let index = 0; index < sessionIds.length; index += concurrency) {
+        const batch = sessionIds.slice(index, index + concurrency);
+        const results = await Promise.all(
+          batch.map((sessionId) => whatsappManager.verifySessionNow(sessionId, 5000))
+        );
+        recoveredCount += results.filter((result) => result.ok).length;
+      }
+
+      return recoveredCount;
+    };
+
+    const fullPoolPreverify = this.getCampaignPreverifyFullPool();
     const probeCount = this.getCampaignPreverifySessionCount();
-    const candidates = (pool.sessionIds ?? [])
+    const baseCandidates = (pool.sessionIds ?? [])
       .filter((id) => !attemptedSessionIds.includes(id))
       .filter((id) => whatsappManager.isSessionConnected(id))
-      .slice(0, probeCount);
+    const candidates = fullPoolPreverify
+      ? baseCandidates
+      : baseCandidates.slice(0, probeCount);
 
     if (candidates.length === 0) {
       return [];
     }
 
-    let recovered = 0;
-    for (const sessionId of candidates) {
-      const result = await whatsappManager.verifySessionNow(sessionId, 5000);
-      if (result.ok) {
-        recovered += 1;
-      }
-    }
+    const recovered = await verifyConnectedBatch(candidates);
 
     const refreshed = this
       .getConnectedSessions(pool)
@@ -1936,6 +1962,8 @@ class CampaignEngine {
           reason,
           debtorId: debtorId ?? null,
           attemptedSessionIds,
+          fullPoolPreverify,
+          probeCount,
           candidates,
           refreshedCount: refreshed.length,
         },
