@@ -2365,13 +2365,18 @@ class WhatsAppManager {
 
   async destroySession(
     sessionId: string,
-    options?: { removeAuth?: boolean }
+    options?: { removeAuth?: boolean; authClientId?: string | null }
   ): Promise<void> {
     const whatsappClient = this.clients.get(sessionId);
-    const sessionRecord = await storage.getSession(sessionId);
-    const authClientId = sessionRecord?.authClientId ?? sessionId;
     this.clearQrWindow(sessionId);
     const removeAuth = options?.removeAuth ?? false;
+    const providedAuthClientId = options?.authClientId ?? null;
+    let authClientId = providedAuthClientId;
+
+    if (!authClientId) {
+      const sessionRecord = await storage.getSession(sessionId);
+      authClientId = sessionRecord?.authClientId ?? sessionId;
+    }
 
     console.log(
       `[wa][${sessionId}] destroySession start (removeAuth=${removeAuth}, authClientId=${authClientId})`

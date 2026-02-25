@@ -921,7 +921,10 @@ export async function registerRoutes(
       }
       // Don't block the HTTP response on whatsapp-web.js teardown, which can hang in some cases.
       // For deletions we also remove LocalAuth state so re-creating the session is a clean slate.
-      void whatsappManager.destroySession(req.params.id, { removeAuth: true });
+      void whatsappManager.destroySession(req.params.id, {
+        removeAuth: true,
+        authClientId: existing.authClientId ?? existing.id,
+      });
       await storage.deleteSession(req.params.id);
       
       io.emit('session:deleted', { id: req.params.id });
