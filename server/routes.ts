@@ -1058,10 +1058,6 @@ export async function registerRoutes(
           limitedScope: null,
           limitedReason: null,
         });
-        await whatsappManager.recomputeSessionHealth(sessionId, {
-          forceCooldown: true,
-          strikeReason: "reset_auth_failed_route",
-        });
         await storage.createSystemLog({
           level: "error",
           source: "whatsapp",

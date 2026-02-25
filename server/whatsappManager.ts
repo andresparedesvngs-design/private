@@ -396,6 +396,40 @@ class WhatsAppManager {
     return /(spam|rate.?limit|blocked|ban)/i.test(reason);
   }
 
+  private classifyDisconnectSignal(
+    reason?: string | null,
+    errorMessage?: string | null
+  ): {
+    cause: "spam" | "proxy" | "other";
+    forceCooldown: boolean;
+    strikeReason: string;
+  } {
+    const spamLike = this.isSpamLikeReason(reason) || this.isSpamLikeReason(errorMessage);
+    if (spamLike) {
+      return {
+        cause: "spam",
+        forceCooldown: true,
+        strikeReason: "disconnect_spam_pattern",
+      };
+    }
+
+    const proxyLike =
+      this.isProxyConnectivityError(reason) || this.isProxyConnectivityError(errorMessage);
+    if (proxyLike) {
+      return {
+        cause: "proxy",
+        forceCooldown: false,
+        strikeReason: "disconnect_proxy_error",
+      };
+    }
+
+    return {
+      cause: "other",
+      forceCooldown: false,
+      strikeReason: "disconnect_event",
+    };
+  }
+
   private async getRecentSessionStats(sessionId: string): Promise<SessionRecentStats> {
     const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const outgoingBaseQuery: Record<string, any> = {
@@ -1266,12 +1300,15 @@ class WhatsAppManager {
     reason: string,
     errorMessage?: string
   ): Promise<void> {
+    const normalizedErrorMessage = errorMessage?.trim();
+    const disconnectReason = normalizedErrorMessage ? normalizedErrorMessage : reason;
+    const classification = this.classifyDisconnectSignal(reason, disconnectReason);
     const wasConnected = whatsappClient.status === "connected";
     const disconnectedAt = new Date();
     whatsappClient.status = "disconnected";
     whatsappClient.lastVerifiedAt = disconnectedAt;
     whatsappClient.lastVerifiedOk = false;
-    whatsappClient.lastVerifyError = errorMessage ?? reason;
+    whatsappClient.lastVerifyError = disconnectReason;
     whatsappClient.limitedUntil = undefined;
     whatsappClient.limitedScope = undefined;
     whatsappClient.limitedReason = undefined;
@@ -1284,17 +1321,26 @@ class WhatsAppManager {
       status: "disconnected",
       disconnectCount: (persistedSession?.disconnectCount ?? 0) + 1,
       lastDisconnectAt: disconnectedAt,
-      lastDisconnectReason: errorMessage ?? reason,
+      lastDisconnectReason: disconnectReason,
       limitedUntil: null,
       limitedScope: null,
       limitedReason: null,
     });
+
+    if (classification.cause === "proxy") {
+      try {
+        await this.markProxyUnhealthyFromSession(sessionId, disconnectReason);
+      } catch (proxyMarkError: any) {
+        console.warn(
+          `[wa][${sessionId}] failed to mark proxy unhealthy on disconnect:`,
+          proxyMarkError?.message ?? proxyMarkError
+        );
+      }
+    }
+
     await this.recomputeSessionHealth(sessionId, {
-      forceCooldown: this.isSpamLikeReason(reason) || this.isSpamLikeReason(errorMessage),
-      strikeReason:
-        this.isSpamLikeReason(reason) || this.isSpamLikeReason(errorMessage)
-          ? "disconnect_spam_pattern"
-          : "disconnect_event",
+      forceCooldown: classification.forceCooldown,
+      strikeReason: classification.strikeReason,
     });
 
     if (wasConnected) {
@@ -1302,7 +1348,12 @@ class WhatsAppManager {
         level: "warning",
         source: "whatsapp",
         message: `Session ${sessionId} disconnected (${reason})`,
-        metadata: { sessionId, reason, error: errorMessage ?? null },
+        metadata: {
+          sessionId,
+          reason,
+          error: disconnectReason,
+          disconnectCause: classification.cause,
+        },
       });
     }
 
@@ -2308,22 +2359,47 @@ class WhatsAppManager {
       console.log(`[wa][${sessionId}] resetSessionAuth completed`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const disconnectClassification = this.classifyDisconnectSignal(
+        "reset_auth_failed",
+        message
+      );
+      const nextStatus = /auth/i.test(message) ? "auth_failed" : "disconnected";
       console.error(`[wa][${sessionId}] resetSessionAuth error:`, message);
       await storage.updateSession(sessionId, {
-        status: "auth_failed",
+        status: nextStatus,
+        lastDisconnectAt: new Date(),
+        lastDisconnectReason: message,
         limitedUntil: null,
         limitedScope: null,
         limitedReason: null,
       });
+
+      if (disconnectClassification.cause === "proxy") {
+        try {
+          await this.markProxyUnhealthyFromSession(sessionId, message);
+        } catch (proxyMarkError: any) {
+          console.warn(
+            `[wa][${sessionId}] failed to mark proxy unhealthy after reset error:`,
+            proxyMarkError?.message ?? proxyMarkError
+          );
+        }
+      }
+
       await this.recomputeSessionHealth(sessionId, {
-        forceCooldown: true,
-        strikeReason: "reset_auth_failed",
+        forceCooldown: disconnectClassification.forceCooldown,
+        strikeReason: disconnectClassification.forceCooldown
+          ? "reset_auth_failed_spam"
+          : "reset_auth_failed",
       });
       await storage.createSystemLog({
         level: "error",
         source: "whatsapp",
         message: `Session ${sessionId} auth reset failed`,
-        metadata: { error: message, oldAuthClientId },
+        metadata: {
+          error: message,
+          oldAuthClientId,
+          disconnectCause: disconnectClassification.cause,
+        },
       });
       throw error;
     }

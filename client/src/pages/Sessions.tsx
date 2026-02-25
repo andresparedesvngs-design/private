@@ -396,8 +396,8 @@ export default function Sessions() {
   const handleResetAuth = async (session: Session) => {
     try {
       setResettingId(session.id);
-      openQrModalForSession(session.id, "reconnect");
       await resetSessionAuth.mutateAsync(session.id);
+      openQrModalForSession(session.id, "reconnect");
       await enableSessionQr.mutateAsync({ id: session.id });
       setWaitingQrId(session.id);
       const qrReady = await waitForQrReady(session.id);
@@ -702,6 +702,16 @@ export default function Sessions() {
       ["disconnected", "auth_failed", "authenticated", "qr_ready"].includes(
         session.status
       );
+    const cooldownUntilMs = session.cooldownUntil
+      ? new Date(session.cooldownUntil).getTime()
+      : Number.NaN;
+    const hasActiveCooldown = Number.isFinite(cooldownUntilMs) && cooldownUntilMs > Date.now();
+    const resetAuthGuardMessage =
+      session.healthStatus === "blocked"
+        ? "Sesión bloqueada por riesgos repetidos. Requiere intervención manual."
+        : hasActiveCooldown
+          ? `Sesión en cooldown hasta ${new Date(cooldownUntilMs).toLocaleString()}.`
+          : null;
     const lastActive = session.lastActive
       ? new Date(session.lastActive).toLocaleTimeString([], {
           hour: "2-digit",
@@ -727,10 +737,9 @@ export default function Sessions() {
               : health === "blocked"
                 ? "text-red-700 border-red-200 bg-red-50"
                 : "text-gray-700 border-gray-200 bg-gray-50";
-    const cooldownHint =
-      session.cooldownUntil && new Date(session.cooldownUntil).getTime() > Date.now()
-        ? new Date(session.cooldownUntil).toLocaleString()
-        : null;
+    const cooldownHint = hasActiveCooldown
+      ? new Date(cooldownUntilMs).toLocaleString()
+      : null;
 
     return (
       <div
@@ -833,7 +842,8 @@ export default function Sessions() {
               size="sm"
               className="gap-2"
               onClick={() => handleResetAuth(session)}
-              disabled={isSessionRunningTask || isProgressStatus}
+              disabled={isSessionRunningTask || isProgressStatus || Boolean(resetAuthGuardMessage)}
+              title={resetAuthGuardMessage ?? undefined}
             >
               {isSessionRunningTask ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -1265,6 +1275,9 @@ export default function Sessions() {
                       <div>Reset auth: {detailsSession.resetAuthCount ?? 0}</div>
                       <div>Reconnects: {detailsSession.reconnectCount ?? 0}</div>
                       <div>Último disconnect: {formatDateTime(detailsSession.lastDisconnectAt)}</div>
+                      <div className="col-span-2">
+                        Motivo último disconnect: {detailsSession.lastDisconnectReason ?? "-"}
+                      </div>
                     </div>
                     <div className="pt-2 border-t">
                       <div className="text-sm font-medium">Salud de sesión</div>
