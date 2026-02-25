@@ -179,6 +179,7 @@ class WhatsAppManager {
   private reconnectInFlight: Map<string, Promise<void>> = new Map();
   private reconnectCooldownUntil: Map<string, number> = new Map();
   private proxyMarkCooldownUntil: Map<string, number> = new Map();
+  private phoneBackfillInFlight: Map<string, Promise<void>> = new Map();
   private readonly authDataPath = resolveWwebjsAuthDir();
 
   private ensureAuthDataPath(): void {
@@ -666,6 +667,142 @@ class WhatsAppManager {
   private normalizePhoneIdentifier(value: string | undefined | null): string {
     if (!value) return "";
     return value.replace(/@.+$/i, "").replace(/\D/g, "");
+  }
+
+  private normalizeSessionPhoneCandidate(value: unknown): string | null {
+    if (typeof value !== "string") {
+      return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const isPhoneLike =
+      /@c\.us$/i.test(trimmed) || /^[+\d][\d\s().-]*$/.test(trimmed);
+    if (!isPhoneLike) {
+      return null;
+    }
+
+    const normalized = this.normalizePhoneIdentifier(trimmed);
+    if (normalized.length < 8) {
+      return null;
+    }
+    return normalized;
+  }
+
+  private resolveClientPhoneNumber(client: any): string | null {
+    const candidates: unknown[] = [
+      client?.info?.wid?.user,
+      client?.info?.wid?._serialized,
+      client?.info?.me?.user,
+      client?.info?.me?._serialized,
+      client?.info?.id?.user,
+      client?.info?.id?._serialized,
+      client?.info?.user,
+      client?.info?._serialized,
+    ];
+
+    for (const candidate of candidates) {
+      const normalized = this.normalizeSessionPhoneCandidate(candidate);
+      if (normalized) {
+        return normalized;
+      }
+    }
+    return null;
+  }
+
+  private getPhoneBackfillAttempts(): number {
+    const envValue = Number(process.env.WHATSAPP_PHONE_BACKFILL_ATTEMPTS ?? "10");
+    if (!Number.isFinite(envValue) || envValue <= 0) {
+      return 10;
+    }
+    return Math.floor(envValue);
+  }
+
+  private getPhoneBackfillDelayMs(): number {
+    const envValue = Number(process.env.WHATSAPP_PHONE_BACKFILL_DELAY_MS ?? "2000");
+    if (!Number.isFinite(envValue) || envValue <= 0) {
+      return 2000;
+    }
+    return Math.floor(envValue);
+  }
+
+  private async backfillConnectedPhoneNumber(
+    sessionId: string,
+    client: any,
+    source: string
+  ): Promise<void> {
+    const existing = this.phoneBackfillInFlight.get(sessionId);
+    if (existing) {
+      return existing;
+    }
+
+    const task = (async () => {
+      const attempts = this.getPhoneBackfillAttempts();
+      const delayMs = this.getPhoneBackfillDelayMs();
+
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const inMemory = this.clients.get(sessionId);
+        if (!inMemory || inMemory.client !== client) {
+          return;
+        }
+        if (!["connected", "limited"].includes(inMemory.status)) {
+          return;
+        }
+
+        const phoneNumber = this.resolveClientPhoneNumber(client);
+        if (phoneNumber) {
+          const current = await storage.getSession(sessionId);
+          if (!current) {
+            return;
+          }
+          if (this.normalizePhoneIdentifier(current.phoneNumber) === phoneNumber) {
+            return;
+          }
+
+          try {
+            await this.cleanupDuplicateSessions(sessionId, phoneNumber);
+          } catch (error) {
+            console.warn("Failed to cleanup duplicate sessions:", error);
+          }
+
+          await storage.updateSession(sessionId, {
+            phoneNumber,
+            lastActive: new Date(),
+          });
+
+          if (this.io) {
+            this.io.emit("session:updated", { id: sessionId });
+            this.io.emit("session:ready", { sessionId, phoneNumber });
+          }
+
+          await storage.createSystemLog({
+            level: "info",
+            source: "whatsapp",
+            message: `Session ${sessionId} phone synchronized (${source})`,
+            metadata: { sessionId, phoneNumber, source, attempt },
+          });
+          return;
+        }
+
+        if (attempt < attempts) {
+          await sleep(delayMs);
+        }
+      }
+    })()
+      .catch((error: any) => {
+        console.warn(
+          `[wa][${sessionId}] failed to backfill phone number:`,
+          error?.message ?? error
+        );
+      })
+      .finally(() => {
+        this.phoneBackfillInFlight.delete(sessionId);
+      });
+
+    this.phoneBackfillInFlight.set(sessionId, task);
+    return task;
   }
 
   normalizePhoneForWhatsapp(phone: string): string {
@@ -1450,6 +1587,7 @@ class WhatsAppManager {
         whatsappClient.lastVerifiedAt = now;
         whatsappClient.lastVerifiedOk = true;
         whatsappClient.lastVerifyError = undefined;
+        void this.backfillConnectedPhoneNumber(sessionId, client, "verify-limited");
       } else {
         const wasConnected = whatsappClient.status === "connected";
         whatsappClient.status = "connected";
@@ -1471,6 +1609,7 @@ class WhatsAppManager {
             this.io.emit("session:updated", { id: sessionId });
           }
         }
+        void this.backfillConnectedPhoneNumber(sessionId, client, "verify-connected");
       }
 
       return { ok: true };
@@ -1867,7 +2006,7 @@ class WhatsAppManager {
 
       this.clearQrWindow(sessionId);
 
-      const phoneNumber = client.info?.wid?.user;
+      const phoneNumber = this.resolveClientPhoneNumber(client);
       if (phoneNumber) {
         try {
           await this.cleanupDuplicateSessions(sessionId, phoneNumber);
@@ -1907,6 +2046,14 @@ class WhatsAppManager {
         message: `Session ${sessionId} connected (${source})`,
         metadata: { sessionId, source, phoneNumber }
       });
+
+      if (!phoneNumber) {
+        void this.backfillConnectedPhoneNumber(
+          sessionId,
+          client,
+          `connected:${source}`
+        );
+      }
 
       await this.patchChatModel(sessionId, client);
       this.startIncomingPolling(sessionId, client);
