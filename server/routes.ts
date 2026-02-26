@@ -240,6 +240,22 @@ export async function registerRoutes(
     const raw = Number(process.env.WHATSAPP_QR_ROUTE_TIMEOUT_MS ?? "10000");
     return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10000;
   })();
+  const MANUAL_SPAM_COOLDOWN_MS = (() => {
+    const raw = Number(process.env.WHATSAPP_MANUAL_SPAM_COOLDOWN_MS ?? "86400000");
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 86400000;
+  })();
+  const ZERO_SEND_LIMITS = {
+    tokensPerMinute: 0,
+    bucketSize: 0,
+    dailyMax: 0,
+    hourlyMax: 0,
+  };
+  const DEFAULT_SEND_LIMITS = {
+    tokensPerMinute: 6,
+    bucketSize: 10,
+    dailyMax: 200,
+    hourlyMax: 60,
+  };
 
   const sessionBusyLocks = new Set<string>();
   const isSessionBusyStatus = (status?: string | null) =>
@@ -736,6 +752,152 @@ export async function registerRoutes(
       }
       const snapshot = await whatsappManager.getSessionLimits(req.params.id);
       res.json(snapshot ?? { sessionId: req.params.id, sendLimits: updated });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/sessions/:id/spam/mark", async (req, res) => {
+    try {
+      const user = ensureRole(req, res, ["admin", "supervisor"]);
+      if (!user) return;
+
+      const schema = z.object({
+        reason: z.string().trim().max(200).optional(),
+      });
+      const { reason } = schema.parse(req.body ?? {});
+      const sessionId = req.params.id;
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      const now = new Date();
+      const cooldownUntil = new Date(now.getTime() + MANUAL_SPAM_COOLDOWN_MS);
+      const strikeCount = Math.max(0, Number(session.strikeCount ?? 0)) + 1;
+
+      const updated = await storage.updateSession(sessionId, {
+        healthStatus: "cooldown",
+        healthScore: 20,
+        healthReason: reason
+          ? `Manual spam suspected: ${reason}`
+          : "Manual spam suspected",
+        healthUpdatedAt: now,
+        cooldownUntil,
+        strikeCount,
+        lastStrikeAt: now,
+        lastStrikeReason: "manual_spam_suspected",
+        sendLimits: { ...ZERO_SEND_LIMITS },
+        lastLimitUpdateAt: now,
+        limitChangeReason: "manual_spam_suspected",
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
+      });
+      if (!updated) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      await storage.createSystemLog({
+        level: "warning",
+        source: "policy",
+        message: `Session ${sessionId} manually marked as spam suspected`,
+        metadata: {
+          sessionId,
+          actorUserId: user.id,
+          actorRole: user.role,
+          reason: reason ?? null,
+          cooldownUntil: cooldownUntil.toISOString(),
+        },
+      });
+
+      io.emit("session:updated", updated);
+
+      res.json({
+        session: updated,
+        cooldownUntil: cooldownUntil.toISOString(),
+      });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/sessions/:id/spam/clear", async (req, res) => {
+    try {
+      const user = ensureRole(req, res, ["admin", "supervisor"]);
+      if (!user) return;
+
+      const schema = z.object({
+        reason: z.string().trim().max(200).optional(),
+      });
+      const { reason } = schema.parse(req.body ?? {});
+      const sessionId = req.params.id;
+      const session = await storage.getSession(sessionId);
+      if (!session) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      const hadManualStrike = session.lastStrikeReason === "manual_spam_suspected";
+      const currentStrikeCount = Math.max(0, Number(session.strikeCount ?? 0));
+      const nextStrikeCount = hadManualStrike
+        ? Math.max(0, currentStrikeCount - 1)
+        : currentStrikeCount;
+      const now = new Date();
+
+      const updated = await storage.updateSession(sessionId, {
+        cooldownUntil: null,
+        healthStatus: "warning",
+        healthScore: 60,
+        healthReason: reason
+          ? `Manual spam mark cleared: ${reason}`
+          : "Manual spam mark cleared",
+        healthUpdatedAt: now,
+        strikeCount: nextStrikeCount,
+        lastStrikeAt:
+          hadManualStrike && nextStrikeCount === 0
+            ? null
+            : session.lastStrikeAt ?? null,
+        lastStrikeReason:
+          hadManualStrike && nextStrikeCount === 0
+            ? null
+            : hadManualStrike
+              ? "manual_spam_cleared"
+              : session.lastStrikeReason ?? null,
+        sendLimits: { ...DEFAULT_SEND_LIMITS },
+        lastLimitUpdateAt: now,
+        limitChangeReason: "manual_spam_cleared",
+        limitedUntil: null,
+        limitedScope: null,
+        limitedReason: null,
+      });
+      if (!updated) {
+        return res.status(404).json({ error: "Session not found" });
+      }
+
+      await whatsappManager.recomputeSessionHealth(sessionId);
+      const refreshed = await storage.getSession(sessionId);
+      const payload = refreshed ?? updated;
+
+      await storage.createSystemLog({
+        level: "info",
+        source: "policy",
+        message: `Session ${sessionId} manual spam mark cleared`,
+        metadata: {
+          sessionId,
+          actorUserId: user.id,
+          actorRole: user.role,
+          reason: reason ?? null,
+        },
+      });
+
+      io.emit("session:updated", payload);
+      res.json({ session: payload });
     } catch (error: any) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: error.errors });

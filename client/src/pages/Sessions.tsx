@@ -23,6 +23,8 @@ import {
   useReconnectAllSessions,
   useResetSessionAuth,
   useEnableSessionQr,
+  useMarkSessionSpamSuspected,
+  useClearSessionSpamMark,
   useVerifySessionsNow,
   useProxyServers,
   useUpdateSession,
@@ -124,6 +126,8 @@ export default function Sessions() {
   const resetSessionAuth = useResetSessionAuth();
   const enableSessionQr = useEnableSessionQr();
   const verifySessionsNow = useVerifySessionsNow();
+  const markSessionSpam = useMarkSessionSpamSuspected();
+  const clearSessionSpamMark = useClearSessionSpamMark();
   const updateSession = useUpdateSession();
   const stopSession = useStopSession();
   const proxyList = useMemo(() => proxies ?? [], [proxies]);
@@ -200,6 +204,47 @@ export default function Sessions() {
       toast({
         title: "No se pudo recalcular",
         description: getErrorMessage(error, "Error recalculando límites."),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleMarkSessionSpam = async (session: Session) => {
+    if (
+      !confirm(
+        "Se aplicará cooldown y bloqueo de envío temporal a esta sesión. ¿Continuar?"
+      )
+    ) {
+      return;
+    }
+    try {
+      const result = await markSessionSpam.mutateAsync({ id: session.id });
+      toast({
+        title: "Sesión marcada por spam",
+        description: `Cooldown activo hasta ${new Date(
+          result.cooldownUntil
+        ).toLocaleString()}.`,
+      });
+    } catch (error) {
+      toast({
+        title: "No se pudo marcar",
+        description: getErrorMessage(error, "Error marcando sesión por spam."),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleClearSessionSpamMark = async (session: Session) => {
+    try {
+      await clearSessionSpamMark.mutateAsync({ id: session.id });
+      toast({
+        title: "Marca manual removida",
+        description: "Se removió la marca manual de spam de la sesión.",
+      });
+    } catch (error) {
+      toast({
+        title: "No se pudo limpiar marca",
+        description: getErrorMessage(error, "Error limpiando marca manual."),
         variant: "destructive",
       });
     }
@@ -622,6 +667,11 @@ export default function Sessions() {
     limited: "Limitada",
   };
   const displayStatus = (status: string) => sessionStatusLabels[status] ?? status;
+  const displaySessionPhone = (session: Session) =>
+    session.phoneNumber ||
+    (session.status === "connected"
+      ? "Sin número detectado"
+      : "Pendiente de vincular");
   const sessionHealthLabels: Record<string, string> = {
     unknown: "Sin datos",
     healthy: "Saludable",
@@ -765,7 +815,7 @@ export default function Sessions() {
           </div>
           <div className="min-w-0">
             <div className="font-medium truncate">
-              {session.phoneNumber || "Pendiente..."}
+              {displaySessionPhone(session)}
             </div>
             <div className="text-xs text-muted-foreground font-mono">
               {(session.id ?? "").slice(0, 12) || "sin-id"}...
@@ -1231,7 +1281,7 @@ export default function Sessions() {
                   <div className="rounded-md border p-3 space-y-1 break-words whitespace-normal [overflow-wrap:anywhere]">
                     <div className="text-sm font-medium">Sesión</div>
                     <div className="text-xs text-muted-foreground">
-                      {detailsSession.phoneNumber || "Pendiente"} · {detailsSession.status}
+                      {displaySessionPhone(detailsSession)} · {detailsSession.status}
                     </div>
                     <div className="text-xs font-mono break-words whitespace-normal [overflow-wrap:anywhere]">
                       {detailsSession.id}
@@ -1327,6 +1377,36 @@ export default function Sessions() {
                         </div>
                       </div>
                       <div className="mt-3 flex items-center justify-end gap-2">
+                        {canManageSessions && (
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            onClick={() => handleMarkSessionSpam(detailsSession)}
+                            disabled={
+                              detailsSessionBusy || markSessionSpam.isPending
+                            }
+                          >
+                            {markSessionSpam.isPending ? (
+                              <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                            ) : null}
+                            Marcar spam
+                          </Button>
+                        )}
+                        {canManageSessions && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleClearSessionSpamMark(detailsSession)}
+                            disabled={
+                              detailsSessionBusy || clearSessionSpamMark.isPending
+                            }
+                          >
+                            {clearSessionSpamMark.isPending ? (
+                              <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                            ) : null}
+                            Quitar marca spam
+                          </Button>
+                        )}
                         <Button
                           variant="outline"
                           size="sm"

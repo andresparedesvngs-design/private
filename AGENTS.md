@@ -1,4 +1,31 @@
 # Repo Instructions
 
 - PM2 target for deploy/ops checks: `whs-beta-rc`.
+- Git does not restart PM2/systemd automatically after `git pull` or `commit`.
+- Frontend-only deploy flow (server):
+  - `npm run build`
+  - `pm2 reload whs-beta-rc`
+  - `pm2 save`
+- Backend/runtime deploy flow (server):
+  - `git pull origin main`
+  - `npm install` (if `package.json` changed)
+  - `npm run build`
+  - `pm2 restart whs-beta-rc --update-env`
+  - `pm2 save`
+- After changing PM2 `ecosystem`, `env`, or instance count, run `pm2 save`.
+- Also run `pm2 save` after:
+  - changing env vars, ports, process name, or instance count
+  - restarts you want to persist across reboot/resurrect
+  - production code updates
+- `pm2 save` is not required for:
+  - local commits without deploy
+  - editing files without restart
+  - repo changes not yet pulled on server
+- To verify `dump.pm2` contains the correct process: `pm2 prettylist | Select-String 'whs-beta-rc'` (or inspect `~/.pm2/dump.pm2` directly).
+- Ensure PM2 starts on boot (once per server): run `pm2 startup`, then `pm2 save`.
+- Post-deploy quick checks:
+  - `pm2 status`
+  - `pm2 logs whs-beta-rc --lines 100`
+  - health check endpoint (for example: `curl http://127.0.0.1:<PORT>/health`)
+- Confirm production path/user context before saving PM2 state (expected app path: `/var/www/paredes_devs`; verify the PM2 user so `~/.pm2/dump.pm2` is written/read from the correct `$HOME`).
 - In this repo, always leave code changes tracked in git (no cambios sueltos al cerrar una tarea).

@@ -678,13 +678,15 @@ class WhatsAppManager {
       return null;
     }
 
-    const isPhoneLike =
-      /@c\.us$/i.test(trimmed) || /^[+\d][\d\s().-]*$/.test(trimmed);
-    if (!isPhoneLike) {
+    const baseCandidate = trimmed.split(":")[0];
+    const normalized = this.normalizePhoneIdentifier(baseCandidate);
+    const hasKnownWaSuffix = /@(c\.us|s\.whatsapp\.net|lid)$/i.test(trimmed);
+    const hasNumericBody = /^[+\d][\d\s().-]*$/.test(trimmed);
+    const hasEnoughDigits = normalized.length >= 8;
+
+    if (!hasKnownWaSuffix && !hasNumericBody && !hasEnoughDigits) {
       return null;
     }
-
-    const normalized = this.normalizePhoneIdentifier(trimmed);
     if (normalized.length < 8) {
       return null;
     }
@@ -709,6 +711,74 @@ class WhatsAppManager {
         return normalized;
       }
     }
+    return null;
+  }
+
+  private async resolveClientPhoneNumberWithFallback(
+    sessionId: string,
+    client: any
+  ): Promise<string | null> {
+    const fromInfo = this.resolveClientPhoneNumber(client);
+    if (fromInfo) {
+      return fromInfo;
+    }
+
+    const page = client?.pupPage;
+    if (!page || typeof page.evaluate !== "function") {
+      return null;
+    }
+
+    try {
+      const candidates = (await this.runWithTimeout(
+        page.evaluate(() => {
+          const w = window as any;
+          const values: string[] = [];
+
+          const pushValue = (value: any) => {
+            if (!value) return;
+            if (typeof value === "string") {
+              values.push(value);
+              return;
+            }
+            if (typeof value === "object") {
+              if (typeof value.user === "string") values.push(value.user);
+              if (typeof value.id === "string") values.push(value.id);
+              if (typeof value._serialized === "string") values.push(value._serialized);
+              if (typeof value.wid === "string") values.push(value.wid);
+              if (typeof value.jid === "string") values.push(value.jid);
+            }
+          };
+
+          pushValue(w?.Store?.Conn?.wid);
+          pushValue(w?.Store?.Conn?.user);
+          pushValue(w?.Store?.State?.Socket?.wid);
+          pushValue(w?.Store?.State?.Socket?.user);
+          pushValue(w?.Store?.User?.getMaybeMeUser?.());
+          pushValue(w?.Store?.User?.getMeUser?.());
+          pushValue(w?.Store?.Me?.wid);
+          pushValue(w?.AuthStore?.Conn?.wid);
+          pushValue(w?.AuthStore?.Conn?.user);
+
+          return values;
+        }),
+        3000,
+        "resolve_client_phone_from_page",
+        sessionId
+      )) as string[];
+
+      for (const candidate of candidates) {
+        const normalized = this.normalizeSessionPhoneCandidate(candidate);
+        if (normalized) {
+          return normalized;
+        }
+      }
+    } catch (error: any) {
+      console.warn(
+        `[wa][${sessionId}] unable to resolve phone from page context:`,
+        error?.message ?? error
+      );
+    }
+
     return null;
   }
 
@@ -751,7 +821,10 @@ class WhatsAppManager {
           return;
         }
 
-        const phoneNumber = this.resolveClientPhoneNumber(client);
+        const phoneNumber = await this.resolveClientPhoneNumberWithFallback(
+          sessionId,
+          client
+        );
         if (phoneNumber) {
           const current = await storage.getSession(sessionId);
           if (!current) {
@@ -2006,7 +2079,10 @@ class WhatsAppManager {
 
       this.clearQrWindow(sessionId);
 
-      const phoneNumber = this.resolveClientPhoneNumber(client);
+      const phoneNumber = await this.resolveClientPhoneNumberWithFallback(
+        sessionId,
+        client
+      );
       if (phoneNumber) {
         try {
           await this.cleanupDuplicateSessions(sessionId, phoneNumber);
