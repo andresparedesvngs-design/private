@@ -85,6 +85,7 @@ export const insertPoolSchema = z.object({
   delayBase: z.number().default(10000),
   delayVariation: z.number().default(5000),
   sessionIds: z.array(z.string()).default([]),
+  targetSessionCount: z.number().int().min(0).optional(),
   active: z.boolean().default(true),
 });
 
@@ -301,6 +302,7 @@ const poolSchema = new mongoose.Schema({
   delayBase: { type: Number, default: 10000 },
   delayVariation: { type: Number, default: 5000 },
   sessionIds: [{ type: String }],
+  targetSessionCount: { type: Number, default: 0 },
   active: { type: Boolean, default: true },
 }, { timestamps: true });
 
@@ -560,6 +562,7 @@ export type Pool = BaseDocument & {
   delayBase: number;
   delayVariation: number;
   sessionIds: string[];
+  targetSessionCount: number;
   active: boolean;
 };
 

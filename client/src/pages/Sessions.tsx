@@ -600,6 +600,15 @@ export default function Sessions() {
       ),
     [sessionList]
   );
+  const connectedSessionsByProxyId = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const session of sessionList ?? []) {
+      if (!session.proxyServerId) continue;
+      if (session.status !== "connected") continue;
+      counts.set(session.proxyServerId, (counts.get(session.proxyServerId) ?? 0) + 1);
+    }
+    return counts;
+  }, [sessionList]);
 
   useEffect(() => {
     if (!detailsSession) return;
@@ -988,7 +997,7 @@ export default function Sessions() {
                         <SelectTrigger className="w-full min-w-0">
                           <SelectValue placeholder="Selecciona un proxy" />
                         </SelectTrigger>
-                        <SelectContent>
+                        <SelectContent className="max-h-72" position="item-aligned">
                           <SelectItem value={NO_PROXY_VALUE}>
                             Sin proxy (directo)
                           </SelectItem>
@@ -999,7 +1008,9 @@ export default function Sessions() {
                               disabled={!proxy.enabled || proxy.status === "offline"}
                             >
                               <span className="block break-words whitespace-normal [overflow-wrap:anywhere]">
-                                {proxy.name} — {proxy.scheme}://{proxy.host}:{proxy.port} — {proxy.status}
+                                {proxy.name} ({connectedSessionsByProxyId.get(proxy.id) ?? 0} conectadas)
+                                {" — "}
+                                {proxy.scheme}://{proxy.host}:{proxy.port} — {proxy.status}
                                 {proxy.lastPublicIp ? ` — ${proxy.lastPublicIp}` : ""}
                               </span>
                             </SelectItem>
@@ -1472,7 +1483,7 @@ export default function Sessions() {
                         <SelectTrigger className="w-full min-w-0">
                           <SelectValue placeholder="Selecciona proxy" />
                         </SelectTrigger>
-                        <SelectContent>
+                        <SelectContent className="max-h-72" position="item-aligned">
                           <SelectItem value={NO_PROXY_VALUE}>Sin proxy (directo)</SelectItem>
                           {proxyList.map((proxy) => (
                             <SelectItem
@@ -1481,7 +1492,9 @@ export default function Sessions() {
                               disabled={!proxy.enabled || proxy.status === "offline"}
                             >
                               <span className="block break-words whitespace-normal [overflow-wrap:anywhere]">
-                                {proxy.name} — {proxy.scheme}://{proxy.host}:{proxy.port} — {proxy.status}
+                                {proxy.name} ({connectedSessionsByProxyId.get(proxy.id) ?? 0} conectadas)
+                                {" — "}
+                                {proxy.scheme}://{proxy.host}:{proxy.port} — {proxy.status}
                                 {proxy.lastPublicIp ? ` — ${proxy.lastPublicIp}` : ""}
                               </span>
                             </SelectItem>

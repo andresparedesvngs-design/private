@@ -234,6 +234,52 @@ class WhatsAppManager {
     return Number.isNaN(date.getTime()) ? null : date;
   }
 
+  private getHealthGuard(session: Session | null | undefined): {
+    blocked: boolean;
+    reason: string | null;
+  } {
+    if (!session) {
+      return { blocked: true, reason: "session_not_found" };
+    }
+
+    const nowMs = Date.now();
+    const status = String(session.healthStatus ?? "unknown").toLowerCase();
+    const cooldownUntil = this.toValidDate(session.cooldownUntil);
+    const cooldownActive = !!cooldownUntil && cooldownUntil.getTime() > nowMs;
+
+    if (status === "blocked") {
+      return { blocked: true, reason: "blocked" };
+    }
+    if (status === "cooldown" || cooldownActive) {
+      return { blocked: true, reason: "cooldown" };
+    }
+    return { blocked: false, reason: null };
+  }
+
+  private getAutoReconnectGuard(session: Session | null | undefined): {
+    blocked: boolean;
+    reason: string | null;
+  } {
+    if (!session) {
+      return { blocked: true, reason: "session_not_found" };
+    }
+
+    const health = this.getHealthGuard(session);
+    if (health.blocked) {
+      return health;
+    }
+
+    const status = String(session.status ?? "").toLowerCase();
+    if (status === "auth_failed") {
+      return { blocked: true, reason: "auth_failed" };
+    }
+    if (status === "disconnected") {
+      return { blocked: true, reason: "disconnected" };
+    }
+
+    return { blocked: false, reason: null };
+  }
+
   private getRateLimitFallbackMs(scope?: "minute" | "hour" | "day"): number {
     if (scope === "day") return 24 * 60 * 60 * 1000;
     if (scope === "hour") return 60 * 60 * 1000;
@@ -631,6 +677,13 @@ class WhatsAppManager {
     windowMs?: number
   ): Promise<{ qrCode: string | null; expiresAt: string | null }> {
     console.log(`[wa][${sessionId}] openQrWindow requested (windowMs=${windowMs ?? "default"})`);
+    const session = await storage.getSession(sessionId);
+    const guard = this.getHealthGuard(session);
+    if (guard.blocked) {
+      this.clearQrWindow(sessionId);
+      return { qrCode: null, expiresAt: null };
+    }
+
     const duration = windowMs && windowMs > 0 ? windowMs : this.getQrWindowMs();
     const expiresAtMs = Date.now() + duration;
     this.qrWindowUntil.set(sessionId, expiresAtMs);
@@ -1290,7 +1343,18 @@ class WhatsAppManager {
         if (!session) {
           return;
         }
-        if (session.status === "auth_failed") {
+        const guard = this.getAutoReconnectGuard(session);
+        if (guard.blocked) {
+          await storage.createSystemLog({
+            level: "info",
+            source: "whatsapp",
+            message: `Controlled reconnect skipped for session ${sessionId}`,
+            metadata: {
+              sessionId,
+              reason,
+              skipReason: guard.reason,
+            },
+          });
           return;
         }
 
@@ -1312,6 +1376,22 @@ class WhatsAppManager {
           limitedScope: null,
           limitedReason: null,
         });
+
+        const latestSession = await storage.getSession(sessionId);
+        const latestGuard = this.getAutoReconnectGuard(latestSession);
+        if (latestGuard.blocked) {
+          await storage.createSystemLog({
+            level: "info",
+            source: "whatsapp",
+            message: `Controlled reconnect cancelled for session ${sessionId}`,
+            metadata: {
+              sessionId,
+              reason,
+              skipReason: latestGuard.reason,
+            },
+          });
+          return;
+        }
         await this.createSession(sessionId);
       } catch (error: any) {
         const message = error?.message ?? String(error);
@@ -2139,6 +2219,13 @@ class WhatsAppManager {
       whatsappClient.qrRaw = qr;
 
       if (this.isManualQrMode() && !this.isQrWindowOpen(sessionId)) {
+        return;
+      }
+
+      const sessionSnapshot = await storage.getSession(sessionId);
+      const healthGuard = this.getHealthGuard(sessionSnapshot);
+      if (healthGuard.blocked) {
+        whatsappClient.qrCode = undefined;
         return;
       }
 
@@ -3028,6 +3115,17 @@ class WhatsAppManager {
       try {
         // Restaurar sesiones activas (incluye limitadas temporales).
         if (session.status === "connected" || session.status === "limited") {
+          const guard = this.getHealthGuard(session);
+          if (guard.blocked) {
+            await storage.createSystemLog({
+              level: "info",
+              source: "whatsapp",
+              message: `Skipping restore for guarded session ${session.id}`,
+              metadata: { sessionId: session.id, skipReason: guard.reason },
+            });
+            continue;
+          }
+
           console.log("Attempting to restore active session:", session.id);
           
           await storage.updateSession(session.id, {

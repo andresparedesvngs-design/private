@@ -436,13 +436,29 @@ export class MongoStorage implements IStorage {
   private transformPool(pool: any): Pool {
     if (!pool) return pool;
     const obj = pool.toObject ? pool.toObject() : pool;
+    const sessionIds: string[] = Array.from(
+      new Set<string>(
+        (Array.isArray(obj.sessionIds) ? obj.sessionIds : [])
+          .map((id: unknown) => (typeof id === "string" ? id.trim() : ""))
+          .filter(Boolean)
+      )
+    );
+    const rawTarget =
+      typeof obj.targetSessionCount === "number"
+        ? obj.targetSessionCount
+        : Number(obj.targetSessionCount);
+    const targetSessionCount =
+      Number.isFinite(rawTarget) && rawTarget >= 0
+        ? Math.floor(rawTarget)
+        : sessionIds.length;
     return {
       id: obj._id ? obj._id.toString() : obj.id,
       name: obj.name,
       strategy: obj.strategy,
       delayBase: obj.delayBase,
       delayVariation: obj.delayVariation,
-      sessionIds: obj.sessionIds,
+      sessionIds,
+      targetSessionCount,
       active: obj.active,
       createdAt: obj.createdAt,
       updatedAt: obj.updatedAt
@@ -936,13 +952,54 @@ export class MongoStorage implements IStorage {
   }
 
   async createPool(pool: InsertPool): Promise<Pool> {
-    const created = await PoolModel.create(pool);
+    const normalizedSessionIds: string[] = Array.from(
+      new Set<string>(
+        (Array.isArray(pool.sessionIds) ? pool.sessionIds : [])
+          .map((id) => (typeof id === "string" ? id.trim() : ""))
+          .filter(Boolean)
+      )
+    );
+    const rawTarget =
+      typeof pool.targetSessionCount === "number"
+        ? pool.targetSessionCount
+        : Number(pool.targetSessionCount);
+    const targetSessionCount =
+      Number.isFinite(rawTarget) && rawTarget >= 0
+        ? Math.floor(rawTarget)
+        : normalizedSessionIds.length;
+
+    const created = await PoolModel.create({
+      ...pool,
+      sessionIds: normalizedSessionIds,
+      targetSessionCount,
+    });
     return this.transformPool(created);
   }
 
   async updatePool(id: string, data: Partial<InsertPool>): Promise<Pool | undefined> {
     if (!mongoose.isValidObjectId(id)) return undefined;
-    const updated = await PoolModel.findByIdAndUpdate(id, data, { new: true });
+    const payload: Record<string, unknown> = { ...data };
+    if (Array.isArray(data.sessionIds)) {
+      payload.sessionIds = Array.from(
+        new Set<string>(
+          data.sessionIds
+            .map((id) => (typeof id === "string" ? id.trim() : ""))
+            .filter(Boolean)
+        )
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(data, "targetSessionCount")) {
+      const rawTarget =
+        typeof data.targetSessionCount === "number"
+          ? data.targetSessionCount
+          : Number(data.targetSessionCount);
+      payload.targetSessionCount =
+        Number.isFinite(rawTarget) && rawTarget >= 0
+          ? Math.floor(rawTarget)
+          : 0;
+    }
+
+    const updated = await PoolModel.findByIdAndUpdate(id, payload, { new: true });
     return updated ? this.transformPool(updated) : undefined;
   }
 

@@ -115,6 +115,31 @@ export async function registerRoutes(
   const normalizePhoneDigits = (value?: string | null) =>
     (value ?? "").replace(/\D/g, "");
 
+  const normalizePoolSessionIds = (value: unknown): string[] => {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return Array.from(
+      new Set(
+        value
+          .map((id) => (typeof id === "string" ? id.trim() : ""))
+          .filter(Boolean)
+      )
+    );
+  };
+
+  const normalizePoolTargetSessionCount = (
+    value: unknown,
+    fallback: number
+  ): number => {
+    const numeric =
+      typeof value === "number" ? value : value == null ? Number.NaN : Number(value);
+    if (Number.isFinite(numeric) && numeric >= 0) {
+      return Math.floor(numeric);
+    }
+    return Math.max(0, Math.floor(fallback));
+  };
+
   type CidrRange = { base: number; mask: number; raw: string };
 
   const parseIpv4 = (value: string): number | null => {
@@ -814,10 +839,14 @@ export async function registerRoutes(
         },
       });
 
-      io.emit("session:updated", updated);
+      await whatsappManager.destroySession(sessionId);
+      const refreshed = await storage.getSession(sessionId);
+      const payload = refreshed ?? updated;
+
+      io.emit("session:updated", payload);
 
       res.json({
-        session: updated,
+        session: payload,
         cooldownUntil: cooldownUntil.toISOString(),
       });
     } catch (error: any) {
@@ -1288,6 +1317,11 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Session not found" });
       }
 
+      const healthGuard = resolveHealthGuard(session);
+      if (healthGuard) {
+        return res.status(healthGuard.status).json(healthGuard.body);
+      }
+
       if (sessionBusyLocks.has(sessionId)) {
         console.warn(`[routes][sessions][${sessionId}] qr blocked: busy`);
         return res.status(409).json({
@@ -1756,7 +1790,16 @@ export async function registerRoutes(
         return;
       }
       const validated = insertPoolSchema.parse(req.body);
-      const pool = await storage.createPool(validated);
+      const sessionIds = normalizePoolSessionIds(validated.sessionIds);
+      const targetSessionCount = normalizePoolTargetSessionCount(
+        validated.targetSessionCount,
+        sessionIds.length
+      );
+      const pool = await storage.createPool({
+        ...validated,
+        sessionIds,
+        targetSessionCount,
+      });
       res.status(201).json(pool);
     } catch (error: any) {
       if (error instanceof z.ZodError) {
@@ -1771,7 +1814,25 @@ export async function registerRoutes(
       if (!ensureRole(req, res, ["admin", "supervisor"])) {
         return;
       }
-      const pool = await storage.updatePool(req.params.id, req.body);
+      const payload: Record<string, unknown> =
+        req.body && typeof req.body === "object" ? { ...(req.body as Record<string, unknown>) } : {};
+
+      const hasSessionIds = Object.prototype.hasOwnProperty.call(payload, "sessionIds");
+      if (hasSessionIds) {
+        const sessionIds = normalizePoolSessionIds(payload.sessionIds);
+        payload.sessionIds = sessionIds;
+        payload.targetSessionCount = normalizePoolTargetSessionCount(
+          payload.targetSessionCount,
+          sessionIds.length
+        );
+      } else if (Object.prototype.hasOwnProperty.call(payload, "targetSessionCount")) {
+        payload.targetSessionCount = normalizePoolTargetSessionCount(
+          payload.targetSessionCount,
+          0
+        );
+      }
+
+      const pool = await storage.updatePool(req.params.id, payload);
       if (!pool) {
         return res.status(404).json({ error: "Pool not found" });
       }

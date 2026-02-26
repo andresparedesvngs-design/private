@@ -57,13 +57,7 @@ class CampaignEngine {
     if (!Array.isArray(pool.sessionIds)) {
       pool.sessionIds = [];
     }
-    const connected = this.getAllConnectedSessions();
-    const candidates = connected.filter((id) => !pool.sessionIds.includes(id));
-    if (candidates.length === 0) {
-      return [];
-    }
-
-    return this.addSessionsToPool(campaignId, pool, candidates, reason);
+    return this.refillPoolToTargetSessionCount(campaignId, pool, reason);
   }
 
   private async refreshPoolDuringDisconnectPause(campaignId: string): Promise<void> {
@@ -2126,7 +2120,89 @@ class CampaignEngine {
   }
 
   private getAllConnectedSessions(): string[] {
-    return whatsappManager.getVerifiedConnectedSessionIdsWithOptions({ includeNotify: false });
+    return Array.from(
+      new Set(
+        whatsappManager
+          .getVerifiedConnectedSessionIdsWithOptions({ includeNotify: false })
+          .filter(Boolean)
+      )
+    );
+  }
+
+  private getPoolTargetSessionCount(pool: Pool): number {
+    if (!Array.isArray(pool.sessionIds)) {
+      pool.sessionIds = [];
+    } else {
+      pool.sessionIds = Array.from(new Set(pool.sessionIds.filter(Boolean)));
+    }
+
+    const raw =
+      typeof pool.targetSessionCount === "number"
+        ? pool.targetSessionCount
+        : Number(pool.targetSessionCount);
+    const normalized =
+      Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : pool.sessionIds.length;
+
+    pool.targetSessionCount = normalized;
+    return normalized;
+  }
+
+  private async getRefillCandidates(pool: Pool): Promise<string[]> {
+    const connected = this.getAllConnectedSessions();
+    if (connected.length === 0) {
+      return [];
+    }
+
+    const assignedToOtherPools = new Set<string>();
+    const allPools = await storage.getPools();
+    for (const candidatePool of allPools) {
+      if (!candidatePool || candidatePool.id === pool.id) {
+        continue;
+      }
+      for (const sessionId of candidatePool.sessionIds ?? []) {
+        if (sessionId) {
+          assignedToOtherPools.add(sessionId);
+        }
+      }
+    }
+
+    return connected.filter(
+      (sessionId) =>
+        !pool.sessionIds.includes(sessionId) &&
+        !assignedToOtherPools.has(sessionId)
+    );
+  }
+
+  private async refillPoolToTargetSessionCount(
+    campaignId: string,
+    pool: Pool,
+    reason: string,
+    debtorId?: string,
+    minTarget?: number
+  ): Promise<string[]> {
+    if (!this.getCampaignPoolFallbackAnySession()) {
+      return [];
+    }
+
+    const desiredTarget = this.getPoolTargetSessionCount(pool);
+    const target = Math.max(minTarget ?? 0, desiredTarget);
+    const currentSize = pool.sessionIds.length;
+    if (currentSize >= target) {
+      return [];
+    }
+
+    const candidates = await this.getRefillCandidates(pool);
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    const needed = target - currentSize;
+    const toAdd = candidates.slice(0, needed);
+    if (toAdd.length === 0) {
+      return [];
+    }
+
+    return this.addSessionsToPool(campaignId, pool, toAdd, reason, debtorId);
   }
 
   private async removeSessionFromPool(
@@ -2175,6 +2251,10 @@ class CampaignEngine {
     reason: string,
     debtorId?: string
   ): Promise<string[]> {
+    if (!Array.isArray(pool.sessionIds)) {
+      pool.sessionIds = [];
+    }
+
     const unique = sessionIds.filter(
       (id) => id && !pool.sessionIds.includes(id)
     );
@@ -2222,27 +2302,18 @@ class CampaignEngine {
       return false;
     }
 
-    const target = minSessions ?? this.getCampaignMinPoolSessions();
-    const connected = await this.getSendReadySessions(
+    const requiredConnected = minSessions ?? this.getCampaignMinPoolSessions();
+    const desiredPoolSize = Math.max(
+      this.getPoolTargetSessionCount(pool),
+      requiredConnected
+    );
+    await this.refillPoolToTargetSessionCount(
       campaignId,
       pool,
       reason,
-      [],
-      debtorId
+      debtorId,
+      desiredPoolSize
     );
-    if (connected.length >= target) {
-      return true;
-    }
-
-    const allConnected = this.getAllConnectedSessions();
-    const candidates = allConnected.filter(id => !pool.sessionIds.includes(id));
-    if (candidates.length === 0) {
-      return false;
-    }
-
-    const needed = Math.max(target - connected.length, 1);
-    const toAdd = candidates.slice(0, needed);
-    await this.addSessionsToPool(campaignId, pool, toAdd, reason, debtorId);
 
     const refreshed = await this.getSendReadySessions(
       campaignId,
@@ -2251,7 +2322,7 @@ class CampaignEngine {
       [],
       debtorId
     );
-    return refreshed.length >= target;
+    return refreshed.length >= requiredConnected;
   }
 
   private async ensurePoolHasConnectedSessions(
@@ -2262,6 +2333,7 @@ class CampaignEngine {
     minSessions?: number
   ): Promise<boolean> {
     const target = minSessions ?? this.getCampaignMinPoolSessions();
+    const desiredPoolSize = Math.max(this.getPoolTargetSessionCount(pool), target);
     const connected = await this.getSendReadySessions(
       campaignId,
       pool,
@@ -2270,6 +2342,15 @@ class CampaignEngine {
       debtorId
     );
     if (connected.length >= target) {
+      if (pool.sessionIds.length < desiredPoolSize) {
+        await this.refillPoolToTargetSessionCount(
+          campaignId,
+          pool,
+          `${reason}_topup`,
+          debtorId,
+          desiredPoolSize
+        );
+      }
       return true;
     }
 
