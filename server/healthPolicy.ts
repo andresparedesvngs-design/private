@@ -98,34 +98,34 @@ const getRampUpCaps = (session: any, now: Date): RampCaps | null => {
   const ageMs = Math.max(0, now.getTime() - createdAt.getTime());
   if (ageMs < 24 * HOUR_MS) {
     return normalizeSendLimits({
-      tokensPerMinute: 2,
-      bucketSize: 4,
-      dailyMax: 80,
-      hourlyMax: 20,
+      tokensPerMinute: 1,
+      bucketSize: 2,
+      dailyMax: 5,
+      hourlyMax: 2,
     });
   }
   if (ageMs < 72 * HOUR_MS) {
     return normalizeSendLimits({
-      tokensPerMinute: 3,
-      bucketSize: 6,
-      dailyMax: 120,
-      hourlyMax: 30,
+      tokensPerMinute: 1,
+      bucketSize: 2,
+      dailyMax: 10,
+      hourlyMax: 4,
     });
   }
   if (ageMs < 168 * HOUR_MS) {
     return normalizeSendLimits({
-      tokensPerMinute: 4,
-      bucketSize: 8,
-      dailyMax: 160,
-      hourlyMax: 40,
+      tokensPerMinute: 2,
+      bucketSize: 3,
+      dailyMax: 20,
+      hourlyMax: 6,
     });
   }
   if (ageMs < 336 * HOUR_MS) {
     return normalizeSendLimits({
-      tokensPerMinute: 5,
-      bucketSize: 10,
-      dailyMax: 200,
-      hourlyMax: 50,
+      tokensPerMinute: 2,
+      bucketSize: 4,
+      dailyMax: 35,
+      hourlyMax: 10,
     });
   }
   return null;
