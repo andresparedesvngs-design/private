@@ -58,6 +58,7 @@ const HEALTH_RESET_STUCK_WINDOW_MS = 20 * 60 * 1000;
 const HEALTH_STRIKE_DEDUP_WINDOW_MS = 60 * 60 * 1000;
 const BLOCK_AFTER_STRIKES = 5;
 const HEALTHY_LIMIT_UPDATE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 
 const DEFAULT_SEND_LIMITS: SessionSendLimits = {
   tokensPerMinute: 6,
@@ -71,6 +72,63 @@ const MAX_SEND_LIMITS: SessionSendLimits = {
   bucketSize: 60,
   dailyMax: 1200,
   hourlyMax: 300,
+};
+
+type RampCaps = SessionSendLimits;
+
+const parseBooleanEnv = (value: string | undefined): boolean | null => {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  return null;
+};
+
+const RAMP_UP_ENABLED = (() => {
+  const envValue = parseBooleanEnv(process.env.WHATSAPP_RAMP_UP_ENABLED);
+  if (envValue !== null) return envValue;
+  return true;
+})();
+
+const getRampUpCaps = (session: any, now: Date): RampCaps | null => {
+  if (!RAMP_UP_ENABLED) return null;
+  const createdAt = parseDate(session?.createdAt);
+  if (!createdAt) return null;
+
+  const ageMs = Math.max(0, now.getTime() - createdAt.getTime());
+  if (ageMs < 24 * HOUR_MS) {
+    return normalizeSendLimits({
+      tokensPerMinute: 2,
+      bucketSize: 4,
+      dailyMax: 80,
+      hourlyMax: 20,
+    });
+  }
+  if (ageMs < 72 * HOUR_MS) {
+    return normalizeSendLimits({
+      tokensPerMinute: 3,
+      bucketSize: 6,
+      dailyMax: 120,
+      hourlyMax: 30,
+    });
+  }
+  if (ageMs < 168 * HOUR_MS) {
+    return normalizeSendLimits({
+      tokensPerMinute: 4,
+      bucketSize: 8,
+      dailyMax: 160,
+      hourlyMax: 40,
+    });
+  }
+  if (ageMs < 336 * HOUR_MS) {
+    return normalizeSendLimits({
+      tokensPerMinute: 5,
+      bucketSize: 10,
+      dailyMax: 200,
+      hourlyMax: 50,
+    });
+  }
+  return null;
 };
 
 export const HOUR_WINDOW_MS = 60 * 60 * 1000;
@@ -401,6 +459,22 @@ export const policyAdjustLimits = (
         hourlyMax: Math.ceil(seed.hourlyMax * 1.15),
       });
       reason = "healthy_increase";
+    }
+  }
+
+  if (!(healthStatus === "blocked" || healthStatus === "cooldown" || cooldownActive)) {
+    const rampCaps = getRampUpCaps(session, now);
+    if (rampCaps) {
+      const rampCapped = normalizeSendLimits({
+        tokensPerMinute: Math.min(target.tokensPerMinute, rampCaps.tokensPerMinute),
+        bucketSize: Math.min(target.bucketSize, rampCaps.bucketSize),
+        dailyMax: Math.min(target.dailyMax, rampCaps.dailyMax),
+        hourlyMax: Math.min(target.hourlyMax, rampCaps.hourlyMax),
+      });
+      if (JSON.stringify(rampCapped) !== JSON.stringify(target)) {
+        target = rampCapped;
+        reason = reason ? `${reason}+ramp_up_cap` : "ramp_up_cap";
+      }
     }
   }
 

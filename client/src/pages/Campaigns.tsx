@@ -625,6 +625,7 @@ export default function Campaigns() {
   const pauseReasonLabels: Record<string, string> = {
     manual: "Pausa manual",
     no_sessions: "Sin sesiones WhatsApp",
+    all_sessions_rate_limited: "Todas las sesiones en limite",
     no_gsm_lines: "Sin líneas GSM",
     session_disconnected: "Sesión desconectada",
   };
@@ -661,6 +662,7 @@ export default function Campaigns() {
     outside_window: "Fuera de horario",
     session_unavailable: "Sesión caída",
     session_unavailable_no_remaining: "Sesiones caídas",
+    rate_limited_wait: "Esperando cupo",
     no_connected_sessions: "Sin sesiones",
     session_retry_reset: "Reintentando",
     scheduled_pause: "Pausa programada",

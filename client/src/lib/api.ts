@@ -93,6 +93,11 @@ export type CampaignPauseSettings = {
   source?: string;
 };
 
+export type CampaignRateLimitSettings = {
+  resumeMode: "auto" | "manual";
+  source?: string;
+};
+
 export type WhatsAppPollingSettings = {
   enabled: boolean;
   intervalMs: number;
@@ -1089,6 +1094,31 @@ export function useUpdateCampaignPauseSettings() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settings', 'campaign-pauses'] });
+    },
+  });
+}
+
+export function useCampaignRateLimitSettings(enabled: boolean = true) {
+  return useQuery({
+    queryKey: ["settings", "campaign-rate-limit"],
+    queryFn: () =>
+      fetchApi<CampaignRateLimitSettings>("/settings/campaign-rate-limit"),
+    enabled,
+  });
+}
+
+export function useUpdateCampaignRateLimitSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: Partial<CampaignRateLimitSettings>) =>
+      fetchApi<CampaignRateLimitSettings>("/settings/campaign-rate-limit", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["settings", "campaign-rate-limit"],
+      });
     },
   });
 }

@@ -13,6 +13,8 @@ import {
   useUpdateCampaignWindowSettings,
   useCampaignPauseSettings,
   useUpdateCampaignPauseSettings,
+  useCampaignRateLimitSettings,
+  useUpdateCampaignRateLimitSettings,
   useWhatsAppPollingSettings,
   useUpdateWhatsAppPollingSettings,
   useUpdateMyProfile,
@@ -36,6 +38,9 @@ export default function Settings() {
   const updateWindow = useUpdateCampaignWindowSettings();
   const { data: pauseSettings, isLoading: pauseLoading } = useCampaignPauseSettings(!isExecutive);
   const updatePauses = useUpdateCampaignPauseSettings();
+  const { data: rateLimitSettings, isLoading: rateLimitLoading } =
+    useCampaignRateLimitSettings(!isExecutive);
+  const updateRateLimitSettings = useUpdateCampaignRateLimitSettings();
   const updateProfile = useUpdateMyProfile();
   const { toast } = useToast();
   const [windowEnabled, setWindowEnabled] = useState(true);
@@ -50,6 +55,7 @@ export default function Settings() {
   const [pauseDurationsMode, setPauseDurationsMode] = useState<"list" | "range">("list");
   const [pauseApplyWhatsapp, setPauseApplyWhatsapp] = useState(true);
   const [pauseApplySms, setPauseApplySms] = useState(true);
+  const [rateLimitResumeMode, setRateLimitResumeMode] = useState<"auto" | "manual">("auto");
   const [notifyEnabled, setNotifyEnabled] = useState(true);
   const [execPhone, setExecPhone] = useState("");
   const [batchWindowSec, setBatchWindowSec] = useState("120");
@@ -92,6 +98,11 @@ export default function Settings() {
     setPauseApplyWhatsapp(pauseSettings.applyToWhatsapp ?? true);
     setPauseApplySms(pauseSettings.applyToSms ?? true);
   }, [pauseSettings]);
+
+  useEffect(() => {
+    if (!rateLimitSettings) return;
+    setRateLimitResumeMode(rateLimitSettings.resumeMode ?? "auto");
+  }, [rateLimitSettings]);
 
   useEffect(() => {
     if (!user) return;
@@ -172,6 +183,24 @@ export default function Settings() {
       toast({
         title: "No se pudo guardar",
         description: getErrorMessage(error, "Error al guardar las pausas."),
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleSaveRateLimitSettings = async () => {
+    try {
+      await updateRateLimitSettings.mutateAsync({
+        resumeMode: rateLimitResumeMode,
+      });
+      toast({
+        title: "Rate-limit actualizado",
+        description: "Se guardo el modo de reanudacion para campanas pausadas por limite.",
+      });
+    } catch (error: any) {
+      toast({
+        title: "No se pudo guardar",
+        description: getErrorMessage(error, "Error al guardar el modo de reanudacion."),
         variant: "destructive",
       });
     }
@@ -555,6 +584,58 @@ export default function Settings() {
                     disabled={pauseLoading || updatePauses.isPending}
                   />
                   <Label htmlFor="pause-sms-switch">Aplicar a SMS</Label>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Reanudacion por limite</CardTitle>
+            <CardDescription>
+              Define si una campana pausada porque todas las sesiones llegaron a limite se reanuda sola o manualmente.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-col gap-4 rounded-lg border border-border/60 p-4">
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="space-y-2 md:col-span-2">
+                  <Label className="text-xs text-muted-foreground">Modo de reanudacion</Label>
+                  <Select
+                    value={rateLimitResumeMode}
+                    onValueChange={(value) =>
+                      setRateLimitResumeMode(value as "auto" | "manual")
+                    }
+                    disabled={rateLimitLoading || updateRateLimitSettings.isPending}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Selecciona modo" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Automatica</SelectItem>
+                      <SelectItem value="manual">Manual</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {rateLimitResumeMode === "auto"
+                      ? "La campana intentara reanudarse cuando detecte una sesion disponible."
+                      : "La campana quedara pausada hasta que la reanudes manualmente."}
+                  </p>
+                  {rateLimitSettings?.source && (
+                    <p className="text-xs text-muted-foreground">
+                      Fuente: {rateLimitSettings.source}
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-end">
+                  <Button
+                    className="w-full"
+                    onClick={handleSaveRateLimitSettings}
+                    disabled={rateLimitLoading || updateRateLimitSettings.isPending}
+                  >
+                    Guardar modo
+                  </Button>
                 </div>
               </div>
             </div>

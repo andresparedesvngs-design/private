@@ -3079,6 +3079,45 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/settings/campaign-rate-limit", async (_req, res) => {
+    try {
+      if (!ensureRole(_req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      res.json(campaignEngine.getCampaignRateLimitSettings());
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/settings/campaign-rate-limit", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const schema = z.object({
+        resumeMode: z.enum(["auto", "manual"]).optional(),
+      });
+      const payload = schema.parse(req.body ?? {});
+
+      campaignEngine.setCampaignRateLimitSettings(payload);
+
+      await storage.createSystemLog({
+        level: "info",
+        source: "campaign",
+        message: "Updated campaign rate-limit resume settings",
+        metadata: payload,
+      });
+
+      res.json(campaignEngine.getCampaignRateLimitSettings());
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Send manual message from a session
   app.post("/api/sessions/:id/send", async (req, res) => {
     try {

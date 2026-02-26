@@ -21,10 +21,12 @@ class CampaignEngine {
   private campaignPauseDurationsModeOverride: "list" | "range" | null = null;
   private campaignPauseApplyWhatsappOverride: boolean | null = null;
   private campaignPauseApplySmsOverride: boolean | null = null;
+  private campaignRateLimitResumeModeOverride: "auto" | "manual" | null = null;
   private disconnectCooldowns: Map<
     string,
     { timeout: NodeJS.Timeout; interval?: NodeJS.Timeout; until: number }
   > = new Map();
+  private rateLimitPauseWatchers: Map<string, NodeJS.Timeout> = new Map();
   private campaignSessionBackstopTimers: Map<string, NodeJS.Timeout> = new Map();
   private campaignSessionBackstopInFlight: Set<string> = new Set();
   private campaignSessionBackstopCursor: Map<string, number> = new Map();
@@ -84,7 +86,10 @@ class CampaignEngine {
     );
   }
 
-  private async resumePausedCampaign(campaign: Campaign): Promise<void> {
+  private async resumePausedCampaign(
+    campaign: Campaign,
+    source: "disconnect_cooldown" | "rate_limit_resume" = "disconnect_cooldown"
+  ): Promise<void> {
     try {
       await this.startCampaign(campaign.id);
       const updated = await storage.updateCampaign(campaign.id, {
@@ -100,21 +105,26 @@ class CampaignEngine {
       await storage.createSystemLog({
         level: "info",
         source: "campaign",
-        message: `Campaign resumed after disconnect cooldown: ${campaign.name}`,
-        metadata: { campaignId: campaign.id },
+        message: `Campaign resumed (${source}): ${campaign.name}`,
+        metadata: { campaignId: campaign.id, source },
       });
     } catch (error: any) {
       await storage.createSystemLog({
         level: "error",
         source: "campaign",
-        message: `Failed to resume campaign after disconnect cooldown: ${campaign.name}`,
+        message: `Failed to resume campaign (${source}): ${campaign.name}`,
         metadata: {
           campaignId: campaign.id,
+          source,
           error: error?.message ?? String(error),
         },
       });
 
-      this.startDisconnectCooldown(campaign.id);
+      if (source === "disconnect_cooldown") {
+        this.startDisconnectCooldown(campaign.id);
+      } else {
+        this.startRateLimitPauseWatcher(campaign.id, campaign.poolId ?? undefined);
+      }
     }
   }
 
@@ -177,6 +187,73 @@ class CampaignEngine {
     });
 
     this.startDisconnectCooldown(campaignId);
+  }
+
+  private clearRateLimitPauseWatcher(campaignId: string): void {
+    const timer = this.rateLimitPauseWatchers.get(campaignId);
+    if (timer) {
+      clearInterval(timer);
+    }
+    this.rateLimitPauseWatchers.delete(campaignId);
+  }
+
+  private startRateLimitPauseWatcher(campaignId: string, poolId?: string | null): void {
+    this.clearRateLimitPauseWatcher(campaignId);
+    if (this.getCampaignRateLimitResumeMode() !== "auto") {
+      return;
+    }
+
+    const resolvedPoolId = poolId ?? null;
+    const intervalMs = Math.max(this.getCampaignWaitForSessionsMs(), 5000);
+    const timer = setInterval(() => {
+      void this.tryResumeRateLimitedCampaign(campaignId, resolvedPoolId);
+    }, intervalMs);
+    this.rateLimitPauseWatchers.set(campaignId, timer);
+    void this.tryResumeRateLimitedCampaign(campaignId, resolvedPoolId);
+  }
+
+  private async tryResumeRateLimitedCampaign(
+    campaignId: string,
+    poolId?: string | null
+  ): Promise<void> {
+    const campaign = await storage.getCampaign(campaignId);
+    if (!campaign || campaign.status !== "paused") {
+      this.clearRateLimitPauseWatcher(campaignId);
+      return;
+    }
+    if (campaign.pausedReason !== "all_sessions_rate_limited") {
+      this.clearRateLimitPauseWatcher(campaignId);
+      return;
+    }
+
+    const resolvedPoolId = poolId ?? campaign.poolId ?? null;
+    if (!resolvedPoolId) {
+      return;
+    }
+
+    const pool = await storage.getPool(resolvedPoolId);
+    if (!pool) {
+      return;
+    }
+
+    await this.addAnyConnectedSessionsToPool(
+      campaignId,
+      pool,
+      "rate_limit_pause_probe"
+    );
+    const recovered = await this.ensurePoolHasConnectedSessions(
+      campaignId,
+      pool,
+      "rate_limit_pause_probe",
+      undefined,
+      1
+    );
+    if (!recovered) {
+      return;
+    }
+
+    this.clearRateLimitPauseWatcher(campaignId);
+    await this.resumePausedCampaign(campaign, "rate_limit_resume");
   }
 
   private getCampaignSessionBackstopEnabled(): boolean {
@@ -613,6 +690,19 @@ class CampaignEngine {
     return 10 * 60 * 1000;
   }
 
+  private getCampaignRateLimitResumeMode(): "auto" | "manual" {
+    if (this.campaignRateLimitResumeModeOverride) {
+      return this.campaignRateLimitResumeModeOverride;
+    }
+    const envValue = (process.env.CAMPAIGN_RATE_LIMIT_RESUME_MODE ?? "")
+      .trim()
+      .toLowerCase();
+    if (envValue === "manual") {
+      return "manual";
+    }
+    return "auto";
+  }
+
   getCampaignPauseSettings() {
     const enabled = this.getCampaignPauseEnabled();
     const strategy = this.getCampaignPauseStrategy();
@@ -648,6 +738,24 @@ class CampaignEngine {
       applyToSms,
       source,
     };
+  }
+
+  getCampaignRateLimitSettings() {
+    const resumeMode = this.getCampaignRateLimitResumeMode();
+    const source = this.campaignRateLimitResumeModeOverride ? "override" : "env";
+    return {
+      resumeMode,
+      source,
+    };
+  }
+
+  setCampaignRateLimitSettings(settings: { resumeMode?: "auto" | "manual" }) {
+    if (settings.resumeMode !== undefined) {
+      if (settings.resumeMode !== "auto" && settings.resumeMode !== "manual") {
+        throw new Error("Invalid rate-limit resume mode");
+      }
+      this.campaignRateLimitResumeModeOverride = settings.resumeMode;
+    }
   }
 
   setCampaignPauseSettings(settings: {
@@ -1031,6 +1139,7 @@ class CampaignEngine {
     if (this.activeCampaigns.get(campaignId)) {
       throw new Error('Campaign is already running');
     }
+    this.clearRateLimitPauseWatcher(campaignId);
 
     const campaign = await storage.getCampaign(campaignId);
     if (!campaign) {
@@ -1099,6 +1208,8 @@ class CampaignEngine {
   }
 
   async stopCampaign(campaignId: string, reason: string = "manual"): Promise<void> {
+    this.clearDisconnectCooldown(campaignId);
+    this.clearRateLimitPauseWatcher(campaignId);
     this.clearCampaignSessionBackstop(campaignId);
     this.activeCampaigns.delete(campaignId);
     
@@ -1454,6 +1565,21 @@ class CampaignEngine {
             );
 
             if (error?.rateLimited && remainingSessions.length > 0) {
+              await this.removeSessionFromPool(
+                campaignId,
+                pool,
+                nextSessionId,
+                "session_rate_limited",
+                debtor.id
+              );
+              await this.ensurePoolHasConnectedSessions(
+                campaignId,
+                pool,
+                "session_rate_limited",
+                debtor.id,
+                1
+              );
+
               await storage.createSystemLog({
                 level: "warn",
                 source: "campaign",
@@ -1471,6 +1597,26 @@ class CampaignEngine {
             }
 
             if (error?.rateLimited) {
+              await this.removeSessionFromPool(
+                campaignId,
+                pool,
+                nextSessionId,
+                "session_rate_limited",
+                debtor.id
+              );
+
+              const recoveredAfterRefill = await this.ensurePoolHasConnectedSessions(
+                campaignId,
+                pool,
+                "session_rate_limited",
+                debtor.id,
+                1
+              );
+              if (recoveredAfterRefill) {
+                attemptedSessionIds.length = 0;
+                continue;
+              }
+
               const recoveredAfterWait = await this.waitForAnyConnectedSessions(
                 campaignId,
                 pool,
@@ -1484,7 +1630,13 @@ class CampaignEngine {
               }
 
               if (!smsEnabled) {
-                await this.pauseCampaignNoSessions(campaignId);
+                await this.pauseCampaignAllRateLimited(campaignId, pool, {
+                  debtorId: debtor.id,
+                  sessionId: nextSessionId,
+                  retryAfterMs: error?.retryAfterMs ?? null,
+                  limitScope: error?.limitScope ?? null,
+                  attemptedSessionIds,
+                });
                 return;
               }
 
@@ -1990,7 +2142,9 @@ class CampaignEngine {
 
     pool.sessionIds = pool.sessionIds.filter(id => id !== sessionId);
 
-    if (this.getCampaignPoolAutoAdjust()) {
+    const persistChange =
+      this.getCampaignPoolAutoAdjust() || reason.includes("rate_limit");
+    if (persistChange) {
       await storage.updatePool(pool.id, { sessionIds: pool.sessionIds });
     }
 
@@ -2031,7 +2185,9 @@ class CampaignEngine {
 
     pool.sessionIds = Array.from(new Set([...pool.sessionIds, ...unique]));
 
-    if (this.getCampaignPoolAutoAdjust()) {
+    const persistChange =
+      this.getCampaignPoolAutoAdjust() || reason.includes("rate_limit");
+    if (persistChange) {
       await storage.updatePool(pool.id, { sessionIds: pool.sessionIds });
     }
 
@@ -2269,6 +2425,42 @@ class CampaignEngine {
         campaignId,
         error: "No hay sesiones conectadas disponibles",
       });
+    }
+  }
+
+  private async pauseCampaignAllRateLimited(
+    campaignId: string,
+    pool: Pool,
+    metadata: Record<string, unknown> = {}
+  ): Promise<void> {
+    const resumeMode = this.getCampaignRateLimitResumeMode();
+    await storage.createSystemLog({
+      level: "warning",
+      source: "campaign",
+      message:
+        "All WhatsApp sessions reached limit. Campaign paused until sessions are available again.",
+      metadata: {
+        campaignId,
+        poolId: pool.id,
+        resumeMode,
+        ...metadata,
+      },
+    });
+
+    await this.stopCampaign(campaignId, "all_sessions_rate_limited");
+
+    if (this.io) {
+      this.io.emit("campaign:error", {
+        campaignId,
+        error:
+          resumeMode === "auto"
+            ? "Todas las sesiones alcanzaron limite. Reanudacion automatica habilitada."
+            : "Todas las sesiones alcanzaron limite. Reanudacion manual requerida.",
+      });
+    }
+
+    if (resumeMode === "auto") {
+      this.startRateLimitPauseWatcher(campaignId, pool.id);
     }
   }
 
