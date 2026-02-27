@@ -872,11 +872,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Session not found" });
       }
 
-      const hadManualStrike = session.lastStrikeReason === "manual_spam_suspected";
       const currentStrikeCount = Math.max(0, Number(session.strikeCount ?? 0));
-      const nextStrikeCount = hadManualStrike
-        ? Math.max(0, currentStrikeCount - 1)
-        : currentStrikeCount;
       const now = new Date();
 
       const updated = await storage.updateSession(sessionId, {
@@ -887,17 +883,9 @@ export async function registerRoutes(
           ? `Manual spam mark cleared: ${reason}`
           : "Manual spam mark cleared",
         healthUpdatedAt: now,
-        strikeCount: nextStrikeCount,
-        lastStrikeAt:
-          hadManualStrike && nextStrikeCount === 0
-            ? null
-            : session.lastStrikeAt ?? null,
-        lastStrikeReason:
-          hadManualStrike && nextStrikeCount === 0
-            ? null
-            : hadManualStrike
-              ? "manual_spam_cleared"
-              : session.lastStrikeReason ?? null,
+        strikeCount: currentStrikeCount,
+        lastStrikeAt: session.lastStrikeAt ?? null,
+        lastStrikeReason: session.lastStrikeReason ?? null,
         sendLimits: { ...DEFAULT_SEND_LIMITS },
         lastLimitUpdateAt: now,
         limitChangeReason: "manual_spam_cleared",
