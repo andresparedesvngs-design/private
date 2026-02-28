@@ -339,8 +339,26 @@ export async function registerRoutes(
     details?: string;
   };
 
+  const checkProxyAvailabilityForReconnect = async (
+    proxyServerId: string,
+    proxyOverrides?: Map<string, any>
+  ): Promise<any | null> => {
+    if (proxyOverrides?.has(proxyServerId)) {
+      return proxyOverrides.get(proxyServerId) ?? null;
+    }
+    try {
+      const checked = await proxyMonitor.checkNow(proxyServerId);
+      if (checked) return checked;
+    } catch {
+      // Fallback to last persisted proxy state when on-demand check fails.
+    }
+    const persisted = await storage.getProxyServer(proxyServerId);
+    return persisted ?? null;
+  };
+
   const reconnectSingleSession = async (
-    sessionId: string
+    sessionId: string,
+    options?: { proxyOverrides?: Map<string, any> }
   ): Promise<ReconnectSessionResult> => {
     const session = await storage.getSession(sessionId);
     if (!session) {
@@ -391,6 +409,46 @@ export async function registerRoutes(
         httpStatus: 409,
         body: buildBusyResponse(sessionId),
       };
+    }
+
+    const proxyServerId = session.proxyServerId ? String(session.proxyServerId) : null;
+    if (proxyServerId) {
+      const proxy = await checkProxyAvailabilityForReconnect(
+        proxyServerId,
+        options?.proxyOverrides
+      );
+      if (!proxy || proxy.enabled === false) {
+        return {
+          sessionId,
+          ok: false,
+          category: "skipped",
+          reason: "proxy_unavailable",
+          httpStatus: 409,
+          body: {
+            error: "proxy_unavailable",
+            message: "Session proxy is unavailable",
+            sessionId,
+            proxyServerId,
+          },
+        };
+      }
+      if (proxy.status === "offline") {
+        return {
+          sessionId,
+          ok: false,
+          category: "skipped",
+          reason: "proxy_offline",
+          httpStatus: 409,
+          body: {
+            error: "proxy_offline",
+            message: "Session proxy is offline",
+            sessionId,
+            proxyServerId,
+            proxyLastCheckAt: proxy.lastCheckAt ?? null,
+            proxyLastError: proxy.lastError ?? null,
+          },
+        };
+      }
     }
 
     const reconnectAt = new Date();
@@ -1102,6 +1160,29 @@ export async function registerRoutes(
       }
 
       const sessions = await storage.getSessions();
+      const proxyOverrides = new Map<string, any>();
+      const uniqueProxyIds = Array.from(
+        new Set(
+          sessions
+            .map((session) =>
+              session.proxyServerId ? String(session.proxyServerId) : ""
+            )
+            .filter(Boolean)
+        )
+      );
+
+      await Promise.all(
+        uniqueProxyIds.map(async (proxyId) => {
+          try {
+            const checked = await proxyMonitor.checkNow(proxyId);
+            proxyOverrides.set(proxyId, checked ?? null);
+          } catch {
+            const persisted = await storage.getProxyServer(proxyId);
+            proxyOverrides.set(proxyId, persisted ?? null);
+          }
+        })
+      );
+
       const results: Array<{
         sessionId: string;
         status: "reconnected" | "skipped" | "failed";
@@ -1111,7 +1192,9 @@ export async function registerRoutes(
       }> = [];
 
       for (const session of sessions) {
-        const result = await reconnectSingleSession(session.id);
+        const result = await reconnectSingleSession(session.id, {
+          proxyOverrides,
+        });
         const body = result.body as any;
         const message =
           typeof body?.message === "string"
