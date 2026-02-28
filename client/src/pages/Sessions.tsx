@@ -396,6 +396,15 @@ export default function Sessions() {
 
     try {
       const result = await reconnectAllSessions.mutateAsync();
+      if (result.running || result.queued) {
+        toast({
+          title: "Reconexión masiva iniciada",
+          description:
+            result.message ??
+            `Proceso en segundo plano para ${result.checked} sesión(es).`,
+        });
+        return;
+      }
       const hasFailures = result.failed > 0;
       toast({
         title: hasFailures

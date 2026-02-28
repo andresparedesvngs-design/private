@@ -135,6 +135,12 @@ export type ReconnectAllSessionsResult = {
   reconnected: number;
   skipped: number;
   failed: number;
+  queued?: boolean;
+  running?: boolean;
+  runId?: number;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  message?: string;
   results: Array<{
     sessionId: string;
     status: "reconnected" | "skipped" | "failed";

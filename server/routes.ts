@@ -22,6 +22,7 @@ import {
   insertCampaignSchema,
   insertDebtorSchema,
   insertContactSchema,
+  type Session,
 } from "@shared/schema";
 import { z } from "zod";
 import * as XLSX from "xlsx";
@@ -339,6 +340,58 @@ export async function registerRoutes(
     details?: string;
   };
 
+  type ReconnectAllSummary = {
+    checked: number;
+    attempted: number;
+    reconnected: number;
+    skipped: number;
+    failed: number;
+    results: Array<{
+      sessionId: string;
+      status: "reconnected" | "skipped" | "failed";
+      reason: string;
+      message: string | null;
+      details: string | null;
+    }>;
+    queued?: boolean;
+    running?: boolean;
+    runId?: number;
+    startedAt?: string;
+    finishedAt?: string;
+    message?: string;
+  };
+
+  const RECONNECT_ALL_CONCURRENCY = (() => {
+    const raw = Number(process.env.WHATSAPP_RECONNECT_ALL_CONCURRENCY ?? "2");
+    if (!Number.isFinite(raw) || raw <= 0) return 2;
+    return Math.min(10, Math.floor(raw));
+  })();
+
+  const mapWithConcurrency = async <T, R>(
+    items: T[],
+    limit: number,
+    worker: (item: T, index: number) => Promise<R>
+  ): Promise<R[]> => {
+    if (!items.length) return [];
+    const results = new Array<R>(items.length);
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.max(1, Math.min(limit, items.length)) },
+      async () => {
+        while (true) {
+          const index = cursor;
+          cursor += 1;
+          if (index >= items.length) {
+            return;
+          }
+          results[index] = await worker(items[index], index);
+        }
+      }
+    );
+    await Promise.all(workers);
+    return results;
+  };
+
   const checkProxyAvailabilityForReconnect = async (
     proxyServerId: string,
     proxyOverrides?: Map<string, any>
@@ -507,6 +560,87 @@ export async function registerRoutes(
       httpStatus: 200,
       body: { message: "Reconnection initiated", sessionId },
     };
+  };
+
+  let reconnectAllRunId = 0;
+  let reconnectAllInFlight: Promise<ReconnectAllSummary> | null = null;
+  let reconnectAllLastSummary: ReconnectAllSummary | null = null;
+
+  const runReconnectAll = async (
+    sessions: Session[],
+    runId: number,
+    startedAtIso: string
+  ): Promise<ReconnectAllSummary> => {
+    const proxyOverrides = new Map<string, any>();
+    const uniqueProxyIds = Array.from(
+      new Set(
+        sessions
+          .map((session) =>
+            session.proxyServerId ? String(session.proxyServerId) : ""
+          )
+          .filter(Boolean)
+      )
+    );
+
+    await Promise.all(
+      uniqueProxyIds.map(async (proxyId) => {
+        try {
+          const checked = await proxyMonitor.checkNow(proxyId);
+          proxyOverrides.set(proxyId, checked ?? null);
+        } catch {
+          const persisted = await storage.getProxyServer(proxyId);
+          proxyOverrides.set(proxyId, persisted ?? null);
+        }
+      })
+    );
+
+    const results = await mapWithConcurrency(
+      sessions,
+      RECONNECT_ALL_CONCURRENCY,
+      async (session) => {
+        const result = await reconnectSingleSession(session.id, {
+          proxyOverrides,
+        });
+        const body = result.body as any;
+        const message =
+          typeof body?.message === "string"
+            ? body.message
+            : typeof body?.error === "string"
+              ? body.error
+              : null;
+        const details =
+          result.details ?? (typeof body?.details === "string" ? body.details : null);
+
+        return {
+          sessionId: session.id,
+          status: result.category,
+          reason: result.reason,
+          message,
+          details,
+        };
+      }
+    );
+
+    const reconnected = results.filter((item) => item.status === "reconnected").length;
+    const skipped = results.filter((item) => item.status === "skipped").length;
+    const failed = results.filter((item) => item.status === "failed").length;
+
+    const summary: ReconnectAllSummary = {
+      checked: sessions.length,
+      attempted: reconnected + failed,
+      reconnected,
+      skipped,
+      failed,
+      results,
+      runId,
+      startedAt: startedAtIso,
+      finishedAt: new Date().toISOString(),
+      running: false,
+      queued: false,
+    };
+
+    reconnectAllLastSummary = summary;
+    return summary;
   };
 
   const extractWaId = (value: any): string | null => {
@@ -1159,74 +1293,55 @@ export async function registerRoutes(
         return;
       }
 
-      const sessions = await storage.getSessions();
-      const proxyOverrides = new Map<string, any>();
-      const uniqueProxyIds = Array.from(
-        new Set(
-          sessions
-            .map((session) =>
-              session.proxyServerId ? String(session.proxyServerId) : ""
-            )
-            .filter(Boolean)
-        )
-      );
-
-      await Promise.all(
-        uniqueProxyIds.map(async (proxyId) => {
-          try {
-            const checked = await proxyMonitor.checkNow(proxyId);
-            proxyOverrides.set(proxyId, checked ?? null);
-          } catch {
-            const persisted = await storage.getProxyServer(proxyId);
-            proxyOverrides.set(proxyId, persisted ?? null);
-          }
-        })
-      );
-
-      const results: Array<{
-        sessionId: string;
-        status: "reconnected" | "skipped" | "failed";
-        reason: string;
-        message: string | null;
-        details: string | null;
-      }> = [];
-
-      for (const session of sessions) {
-        const result = await reconnectSingleSession(session.id, {
-          proxyOverrides,
-        });
-        const body = result.body as any;
-        const message =
-          typeof body?.message === "string"
-            ? body.message
-            : typeof body?.error === "string"
-              ? body.error
-              : null;
-        const details =
-          result.details ??
-          (typeof body?.details === "string" ? body.details : null);
-
-        results.push({
-          sessionId: session.id,
-          status: result.category,
-          reason: result.reason,
-          message,
-          details,
-        });
+      if (reconnectAllInFlight) {
+        const previous = reconnectAllLastSummary;
+        return res.status(202).json({
+          checked: previous?.checked ?? 0,
+          attempted: previous?.attempted ?? 0,
+          reconnected: previous?.reconnected ?? 0,
+          skipped: previous?.skipped ?? 0,
+          failed: previous?.failed ?? 0,
+          results: previous?.results ?? [],
+          runId: previous?.runId ?? reconnectAllRunId,
+          startedAt: previous?.startedAt ?? undefined,
+          finishedAt: previous?.finishedAt ?? undefined,
+          queued: false,
+          running: true,
+          message: "Reconnect-all ya está ejecutándose en segundo plano.",
+        } satisfies ReconnectAllSummary);
       }
 
-      const reconnected = results.filter((item) => item.status === "reconnected").length;
-      const skipped = results.filter((item) => item.status === "skipped").length;
-      const failed = results.filter((item) => item.status === "failed").length;
+      const sessions = await storage.getSessions();
+      const runId = reconnectAllRunId + 1;
+      reconnectAllRunId = runId;
+      const startedAtIso = new Date().toISOString();
 
-      res.json({
+      reconnectAllInFlight = runReconnectAll(sessions, runId, startedAtIso)
+        .catch((error: any) => {
+          console.error(
+            `[routes][sessions][reconnect-all] run failed (runId=${runId}):`,
+            error?.message ?? error
+          );
+          throw error;
+        })
+        .finally(() => {
+          reconnectAllInFlight = null;
+        });
+
+      res.status(202).json({
         checked: sessions.length,
-        attempted: reconnected + failed,
-        reconnected,
-        skipped,
-        failed,
-        results,
-      });
+        attempted: 0,
+        reconnected: 0,
+        skipped: 0,
+        failed: 0,
+        results: [],
+        runId,
+        startedAt: startedAtIso,
+        finishedAt: undefined,
+        queued: true,
+        running: true,
+        message: `Reconnect-all iniciado en segundo plano (concurrency=${RECONNECT_ALL_CONCURRENCY}).`,
+      } satisfies ReconnectAllSummary);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

@@ -45,6 +45,10 @@ export const getErrorMessage = (err: any, fallback: string = "Error inesperado")
   const formattedDetails = formatZodIssues(data?.details) || formatZodIssues(data?.error);
   if (formattedDetails) return formattedDetails;
 
+  // Prefer explicit backend details when present (string/object), e.g. reconnect/reset-auth failures.
+  const detailsText = safeToString(data?.details).trim();
+  if (detailsText) return detailsText;
+
   const message = data?.message || data?.error || err?.message || (typeof err === "string" ? err : "");
   const asText = safeToString(message).trim();
   return asText ? asText : fallback;
