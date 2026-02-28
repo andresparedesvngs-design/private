@@ -256,11 +256,6 @@ export async function registerRoutes(
     return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 30000;
   })();
 
-  const RESET_AUTH_ROUTE_TIMEOUT_MS = (() => {
-    const raw = Number(process.env.WHATSAPP_RESET_AUTH_ROUTE_TIMEOUT_MS ?? "45000");
-    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 45000;
-  })();
-
   const QR_ROUTE_TIMEOUT_MS = (() => {
     const raw = Number(process.env.WHATSAPP_QR_ROUTE_TIMEOUT_MS ?? "10000");
     return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 10000;
@@ -282,12 +277,28 @@ export async function registerRoutes(
     hourlyMax: 60,
   };
 
-  const sessionBusyLocks = new Set<string>();
   const isSessionBusyStatus = (status?: string | null) =>
     status === "initializing" || status === "reconnecting";
 
   const isSessionBusy = (sessionId: string, status?: string | null) =>
-    sessionBusyLocks.has(sessionId) || isSessionBusyStatus(status);
+    whatsappManager.isSessionLifecycleBusy(sessionId) || isSessionBusyStatus(status);
+
+  const buildBusyResponse = (sessionId: string) => {
+    const lifecycle = whatsappManager.getSessionLifecycleState(sessionId);
+    return {
+      error: "busy",
+      message: "Session is busy",
+      sessionId,
+      operation: lifecycle?.operation ?? null,
+      attemptId: lifecycle?.attemptId ?? null,
+      origin: lifecycle?.origin ?? null,
+      startedAt:
+        lifecycle?.startedAt != null
+          ? new Date(lifecycle.startedAt).toISOString()
+          : null,
+      lockWaitMs: lifecycle?.lockWaitMs ?? null,
+    };
+  };
 
   const resolveHealthGuard = (session: any) => {
     if (!session) return null;
@@ -378,48 +389,20 @@ export async function registerRoutes(
         category: "skipped",
         reason: "busy",
         httpStatus: 409,
-        body: {
-          error: "busy",
-          message: "Session is busy",
-          sessionId,
-        },
+        body: buildBusyResponse(sessionId),
       };
     }
 
-    sessionBusyLocks.add(sessionId);
     const reconnectAt = new Date();
     console.log(`[routes][sessions][${sessionId}] reconnect start`);
 
     try {
-      await storage.updateSession(sessionId, {
-        status: "reconnecting",
-        qrCode: null,
-        limitedUntil: null,
-        limitedScope: null,
-        limitedReason: null,
+      await whatsappManager.reconnectSession(sessionId, {
+        origin: "manual_route",
+        reconnectAt,
+        destroyTimeoutMs: RECONNECT_DESTROY_TIMEOUT_MS,
+        createTimeoutMs: RECONNECT_CREATE_TIMEOUT_MS,
       });
-
-      await withTimeout(
-        whatsappManager.destroySession(sessionId),
-        RECONNECT_DESTROY_TIMEOUT_MS,
-        `reconnect destroy session ${sessionId}`
-      );
-
-      await storage.updateSession(sessionId, {
-        status: "initializing",
-        qrCode: null,
-        reconnectCount: (session.reconnectCount ?? 0) + 1,
-        lastReconnectAt: reconnectAt,
-        limitedUntil: null,
-        limitedScope: null,
-        limitedReason: null,
-      });
-
-      await withTimeout(
-        whatsappManager.createSession(sessionId),
-        RECONNECT_CREATE_TIMEOUT_MS,
-        `reconnect create session ${sessionId}`
-      );
     } catch (error: any) {
       const message = error?.message ?? String(error);
       const nextStatus = /auth/i.test(message) ? "auth_failed" : "disconnected";
@@ -453,8 +436,6 @@ export async function registerRoutes(
         },
         details: message,
       };
-    } finally {
-      sessionBusyLocks.delete(sessionId);
     }
 
     io.emit("session:reconnecting", { id: sessionId });
@@ -1214,21 +1195,12 @@ export async function registerRoutes(
 
       if (isSessionBusy(sessionId, session.status)) {
         console.warn(`[routes][sessions][${sessionId}] reset-auth blocked: busy`);
-        return res.status(409).json({
-          error: "busy",
-          message: "Session is busy",
-          sessionId,
-        });
+        return res.status(409).json(buildBusyResponse(sessionId));
       }
 
-      sessionBusyLocks.add(sessionId);
       console.log(`[routes][sessions][${sessionId}] reset-auth start`);
       try {
-        await withTimeout(
-          whatsappManager.resetSessionAuth(sessionId),
-          RESET_AUTH_ROUTE_TIMEOUT_MS,
-          `reset-auth session ${sessionId}`
-        );
+        await whatsappManager.resetSessionAuth(sessionId, { origin: "manual_route" });
       } catch (error: any) {
         const message = error?.message ?? String(error);
         const nextStatus = /auth/i.test(message) ? "auth_failed" : "disconnected";
@@ -1253,8 +1225,6 @@ export async function registerRoutes(
           details: message,
           sessionId,
         });
-      } finally {
-        sessionBusyLocks.delete(sessionId);
       }
 
       io.emit("session:reconnecting", { id: sessionId });
@@ -1310,13 +1280,9 @@ export async function registerRoutes(
         return res.status(healthGuard.status).json(healthGuard.body);
       }
 
-      if (sessionBusyLocks.has(sessionId)) {
+      if (whatsappManager.isSessionLifecycleBusy(sessionId)) {
         console.warn(`[routes][sessions][${sessionId}] qr blocked: busy`);
-        return res.status(409).json({
-          error: "busy",
-          message: "Session is busy",
-          sessionId,
-        });
+        return res.status(409).json(buildBusyResponse(sessionId));
       }
 
       const schema = z.object({

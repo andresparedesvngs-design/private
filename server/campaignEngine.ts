@@ -31,6 +31,8 @@ class CampaignEngine {
   private campaignSessionBackstopInFlight: Set<string> = new Set();
   private campaignSessionBackstopCursor: Map<string, number> = new Map();
   private campaignSessionBackstopLastLogAt: Map<string, number> = new Map();
+  private campaignSessionBackstopFailStreak: Map<string, number> = new Map();
+  private sessionQuarantineUntil: Map<string, number> = new Map();
   private readonly disconnectRefillIntervalMs = 60 * 1000;
 
   setSocketServer(io: SocketServer) {
@@ -276,6 +278,24 @@ class CampaignEngine {
     return Math.min(Math.max(safe, 1), 10);
   }
 
+  private getCampaignSessionBackstopPauseOnFailures(): boolean {
+    const envValue = this.parseBooleanEnv(
+      process.env.CAMPAIGN_SESSION_BACKSTOP_PAUSE_ON_FAILURES
+    );
+    if (envValue !== null) {
+      return envValue;
+    }
+    return true;
+  }
+
+  private getCampaignSessionBackstopPauseThreshold(): number {
+    const envValue = this.parsePositiveIntEnv(
+      process.env.CAMPAIGN_SESSION_BACKSTOP_PAUSE_THRESHOLD
+    );
+    const safe = envValue ?? 3;
+    return Math.min(Math.max(safe, 1), 20);
+  }
+
   private clearCampaignSessionBackstop(campaignId: string): void {
     const timer = this.campaignSessionBackstopTimers.get(campaignId);
     if (timer) {
@@ -285,6 +305,7 @@ class CampaignEngine {
     this.campaignSessionBackstopInFlight.delete(campaignId);
     this.campaignSessionBackstopCursor.delete(campaignId);
     this.campaignSessionBackstopLastLogAt.delete(campaignId);
+    this.campaignSessionBackstopFailStreak.delete(campaignId);
   }
 
   private startCampaignSessionBackstop(campaignId: string, poolId?: string | null): void {
@@ -303,6 +324,56 @@ class CampaignEngine {
     this.campaignSessionBackstopTimers.set(campaignId, timer);
 
     void this.runCampaignSessionBackstop(campaignId, poolId);
+  }
+
+  private async applyBackstopFailStreak(
+    campaignId: string,
+    poolId: string,
+    failCount: number,
+    batchSize: number,
+    metadata?: Record<string, unknown>
+  ): Promise<boolean> {
+    if (!this.getCampaignSessionBackstopPauseOnFailures()) {
+      return false;
+    }
+
+    const isAllFailed = batchSize > 0 && failCount >= batchSize;
+    if (!isAllFailed) {
+      this.campaignSessionBackstopFailStreak.delete(campaignId);
+      return false;
+    }
+
+    const streak = (this.campaignSessionBackstopFailStreak.get(campaignId) ?? 0) + 1;
+    this.campaignSessionBackstopFailStreak.set(campaignId, streak);
+    const threshold = this.getCampaignSessionBackstopPauseThreshold();
+    if (streak < threshold) {
+      return false;
+    }
+
+    await storage.createSystemLog({
+      level: "error",
+      source: "campaign",
+      message: `Campaign paused by session backstop after ${streak} unstable cycles`,
+      metadata: {
+        campaignId,
+        poolId,
+        streak,
+        threshold,
+        ...metadata,
+      },
+    });
+
+    await this.stopCampaign(campaignId, "session_backstop_unstable");
+
+    if (this.io) {
+      this.io.emit("campaign:error", {
+        campaignId,
+        error:
+          "Campana pausada por sesiones inestables consecutivas detectadas por backstop.",
+      });
+    }
+
+    return true;
   }
 
   private async runCampaignSessionBackstop(
@@ -355,6 +426,10 @@ class CampaignEngine {
         })
       );
 
+      if (failCount === 0) {
+        this.campaignSessionBackstopFailStreak.delete(campaignId);
+      }
+
       if (failCount > 0) {
         const now = Date.now();
         const lastLogAt = this.campaignSessionBackstopLastLogAt.get(campaignId) ?? 0;
@@ -373,8 +448,25 @@ class CampaignEngine {
             },
           });
         }
+
+        const paused = await this.applyBackstopFailStreak(
+          campaignId,
+          poolId,
+          failCount,
+          batch.length,
+          {
+            batch,
+            okCount,
+            failCount,
+          }
+        );
+        if (paused) {
+          return;
+        }
       }
     } catch (error: any) {
+      const streak = (this.campaignSessionBackstopFailStreak.get(campaignId) ?? 0) + 1;
+      this.campaignSessionBackstopFailStreak.set(campaignId, streak);
       const now = Date.now();
       const lastLogAt = this.campaignSessionBackstopLastLogAt.get(campaignId) ?? 0;
       if (now - lastLogAt >= 60000) {
@@ -389,6 +481,34 @@ class CampaignEngine {
             error: error?.message ?? String(error),
           },
         });
+      }
+
+      if (this.getCampaignSessionBackstopPauseOnFailures()) {
+        const threshold = this.getCampaignSessionBackstopPauseThreshold();
+        if (streak >= threshold) {
+          await storage.createSystemLog({
+            level: "error",
+            source: "campaign",
+            message: `Campaign paused by session backstop after ${streak} verify errors`,
+            metadata: {
+              campaignId,
+              poolId,
+              streak,
+              threshold,
+              error: error?.message ?? String(error),
+            },
+          });
+
+          await this.stopCampaign(campaignId, "session_backstop_unstable");
+          if (this.io) {
+            this.io.emit("campaign:error", {
+              campaignId,
+              error:
+                "Campana pausada por errores consecutivos del verificador de sesiones.",
+            });
+          }
+          return;
+        }
       }
     } finally {
       this.campaignSessionBackstopInFlight.delete(campaignId);
@@ -452,6 +572,40 @@ class CampaignEngine {
     if (["true", "1", "yes", "on"].includes(normalized)) return true;
     if (["false", "0", "no", "off"].includes(normalized)) return false;
     return null;
+  }
+
+  private toValidDate(value: unknown): Date | null {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(String(value));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  private getSessionQuarantineUntilMs(sessionId: string): number {
+    const untilMs = this.sessionQuarantineUntil.get(sessionId) ?? 0;
+    if (untilMs > 0 && untilMs <= Date.now()) {
+      this.sessionQuarantineUntil.delete(sessionId);
+      return 0;
+    }
+    return untilMs;
+  }
+
+  private isSessionQuarantined(sessionId: string): boolean {
+    return this.getSessionQuarantineUntilMs(sessionId) > Date.now();
+  }
+
+  private setSessionQuarantineUntil(sessionId: string, untilMs: number): void {
+    if (!Number.isFinite(untilMs)) {
+      return;
+    }
+    const normalized = Math.floor(untilMs);
+    if (normalized <= Date.now()) {
+      this.sessionQuarantineUntil.delete(sessionId);
+      return;
+    }
+    const existing = this.sessionQuarantineUntil.get(sessionId) ?? 0;
+    if (normalized > existing) {
+      this.sessionQuarantineUntil.set(sessionId, normalized);
+    }
   }
 
   private parseTimeToMinutes(value: string | undefined): number | null {
@@ -567,6 +721,14 @@ class CampaignEngine {
   private getCampaignWaitForSessionsMs(): number {
     const envValue = this.parsePositiveIntEnv(process.env.CAMPAIGN_WAIT_FOR_SESSIONS_MS);
     return envValue ?? 5000;
+  }
+
+  private getSessionUnavailableCooldownMs(): number {
+    const envValue = this.parsePositiveIntEnv(
+      process.env.CAMPAIGN_SESSION_UNAVAILABLE_COOLDOWN_MS
+    );
+    const safe = envValue ?? 15 * 60 * 1000;
+    return Math.min(Math.max(safe, 60 * 1000), 24 * 60 * 60 * 1000);
   }
 
   private getCampaignPreverifySessionCount(): number {
@@ -1564,7 +1726,8 @@ class CampaignEngine {
                 pool,
                 nextSessionId,
                 "session_rate_limited",
-                debtor.id
+                debtor.id,
+                { quarantineMs: error?.retryAfterMs ?? null }
               );
               await this.ensurePoolHasConnectedSessions(
                 campaignId,
@@ -1596,7 +1759,8 @@ class CampaignEngine {
                 pool,
                 nextSessionId,
                 "session_rate_limited",
-                debtor.id
+                debtor.id,
+                { quarantineMs: error?.retryAfterMs ?? null }
               );
 
               const recoveredAfterRefill = await this.ensurePoolHasConnectedSessions(
@@ -2152,9 +2316,14 @@ class CampaignEngine {
     if (connected.length === 0) {
       return [];
     }
+    const nowMs = Date.now();
 
     const assignedToOtherPools = new Set<string>();
-    const allPools = await storage.getPools();
+    const [allPools, allSessions] = await Promise.all([
+      storage.getPools(),
+      storage.getSessions(),
+    ]);
+    const sessionById = new Map(allSessions.map((session) => [session.id, session]));
     for (const candidatePool of allPools) {
       if (!candidatePool || candidatePool.id === pool.id) {
         continue;
@@ -2166,11 +2335,39 @@ class CampaignEngine {
       }
     }
 
-    return connected.filter(
-      (sessionId) =>
-        !pool.sessionIds.includes(sessionId) &&
-        !assignedToOtherPools.has(sessionId)
-    );
+    return connected.filter((sessionId) => {
+      if (pool.sessionIds.includes(sessionId)) {
+        return false;
+      }
+      if (assignedToOtherPools.has(sessionId)) {
+        return false;
+      }
+      if (this.isSessionQuarantined(sessionId)) {
+        return false;
+      }
+
+      const session = sessionById.get(sessionId);
+      if (!session) {
+        return true;
+      }
+
+      const limitedUntil = this.toValidDate(session.limitedUntil);
+      const limitedActive =
+        String(session.status ?? "").toLowerCase() === "limited" &&
+        Boolean(limitedUntil && limitedUntil.getTime() > nowMs);
+      if (limitedActive && limitedUntil) {
+        this.setSessionQuarantineUntil(sessionId, limitedUntil.getTime());
+        return false;
+      }
+
+      const cooldownUntil = this.toValidDate(session.cooldownUntil);
+      const cooldownActive = Boolean(cooldownUntil && cooldownUntil.getTime() > nowMs);
+      if (cooldownActive || String(session.healthStatus ?? "").toLowerCase() === "blocked") {
+        return false;
+      }
+
+      return true;
+    });
   }
 
   private async refillPoolToTargetSessionCount(
@@ -2210,7 +2407,8 @@ class CampaignEngine {
     pool: Pool,
     sessionId: string,
     reason: string,
-    debtorId?: string
+    debtorId?: string,
+    options?: { quarantineMs?: number | null }
   ): Promise<boolean> {
     if (!pool.sessionIds?.includes(sessionId)) {
       return false;
@@ -2228,6 +2426,29 @@ class CampaignEngine {
       this.io.emit("pool:updated", { poolId: pool.id });
     }
 
+    let quarantineUntilIso: string | null = null;
+    if (reason === "session_rate_limited") {
+      const nowMs = Date.now();
+      let quarantineUntilMs = Number(options?.quarantineMs ?? Number.NaN);
+      if (!Number.isFinite(quarantineUntilMs) || quarantineUntilMs <= 0) {
+        const session = await storage.getSession(sessionId);
+        const limitedUntil = this.toValidDate(session?.limitedUntil);
+        if (limitedUntil && limitedUntil.getTime() > nowMs) {
+          quarantineUntilMs = limitedUntil.getTime() - nowMs;
+        }
+      }
+
+      if (Number.isFinite(quarantineUntilMs) && quarantineUntilMs > 0) {
+        const untilMs = nowMs + Math.floor(quarantineUntilMs);
+        this.setSessionQuarantineUntil(sessionId, untilMs);
+        quarantineUntilIso = new Date(untilMs).toISOString();
+      }
+    } else if (reason.startsWith("session_unavailable")) {
+      const untilMs = Date.now() + this.getSessionUnavailableCooldownMs();
+      this.setSessionQuarantineUntil(sessionId, untilMs);
+      quarantineUntilIso = new Date(untilMs).toISOString();
+    }
+
     await storage.createSystemLog({
       level: "warn",
       source: "campaign",
@@ -2238,6 +2459,7 @@ class CampaignEngine {
         sessionId,
         reason,
         debtorId: debtorId ?? null,
+        quarantineUntil: quarantineUntilIso,
       },
     });
 

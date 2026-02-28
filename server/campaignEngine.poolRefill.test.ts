@@ -42,6 +42,29 @@ describe("campaignEngine pool refill", () => {
         targetSessionCount: 1,
       }),
     ]);
+    vi.spyOn(storage, "getSessions").mockResolvedValue([
+      {
+        id: "session-b",
+        status: "connected",
+        limitedUntil: null,
+        cooldownUntil: null,
+        healthStatus: "healthy",
+      } as any,
+      {
+        id: "session-c",
+        status: "connected",
+        limitedUntil: null,
+        cooldownUntil: null,
+        healthStatus: "healthy",
+      } as any,
+      {
+        id: "session-d",
+        status: "connected",
+        limitedUntil: null,
+        cooldownUntil: null,
+        healthStatus: "healthy",
+      } as any,
+    ]);
 
     const candidates = await (campaignEngine as any).getRefillCandidates(
       currentPool
@@ -83,5 +106,81 @@ describe("campaignEngine pool refill", () => {
       undefined
     );
     expect(added).toEqual(["session-b", "session-c"]);
+  });
+
+  it("skips rate-limited sessions until limited window expires", async () => {
+    const currentPool = makePool({
+      id: "pool-current",
+      sessionIds: [],
+      targetSessionCount: 1,
+    });
+
+    const limitedUntil = new Date(Date.now() + 60_000);
+    vi.spyOn(
+      whatsappManager,
+      "getVerifiedConnectedSessionIdsWithOptions"
+    ).mockReturnValue(["session-limited", "session-ok"]);
+    vi.spyOn(storage, "getPools").mockResolvedValue([currentPool]);
+    vi.spyOn(storage, "getSessions").mockResolvedValue([
+      {
+        id: "session-limited",
+        status: "limited",
+        limitedUntil,
+        cooldownUntil: null,
+        healthStatus: "healthy",
+      } as any,
+      {
+        id: "session-ok",
+        status: "connected",
+        limitedUntil: null,
+        cooldownUntil: null,
+        healthStatus: "healthy",
+      } as any,
+    ]);
+
+    const candidates = await (campaignEngine as any).getRefillCandidates(
+      currentPool
+    );
+    expect(candidates).toEqual(["session-ok"]);
+  });
+
+  it("skips sessions in temporary unavailable quarantine", async () => {
+    const currentPool = makePool({
+      id: "pool-current",
+      sessionIds: [],
+      targetSessionCount: 1,
+    });
+
+    vi.spyOn(
+      whatsappManager,
+      "getVerifiedConnectedSessionIdsWithOptions"
+    ).mockReturnValue(["session-unavailable", "session-ok"]);
+    vi.spyOn(storage, "getPools").mockResolvedValue([currentPool]);
+    vi.spyOn(storage, "getSessions").mockResolvedValue([
+      {
+        id: "session-unavailable",
+        status: "connected",
+        limitedUntil: null,
+        cooldownUntil: null,
+        healthStatus: "healthy",
+      } as any,
+      {
+        id: "session-ok",
+        status: "connected",
+        limitedUntil: null,
+        cooldownUntil: null,
+        healthStatus: "healthy",
+      } as any,
+    ]);
+
+    (campaignEngine as any).setSessionQuarantineUntil(
+      "session-unavailable",
+      Date.now() + 60_000
+    );
+
+    const candidates = await (campaignEngine as any).getRefillCandidates(
+      currentPool
+    );
+    expect(candidates).toEqual(["session-ok"]);
   });
 });
