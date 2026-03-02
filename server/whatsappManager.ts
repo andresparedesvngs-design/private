@@ -431,6 +431,50 @@ class WhatsAppManager {
     };
   }
 
+  private applyPersistedRateLimitState(
+    whatsappClient: WhatsAppClient,
+    session: Session | null | undefined,
+    nowMs = Date.now()
+  ): {
+    active: boolean;
+    error?: string;
+  } {
+    if (!session) {
+      return { active: false };
+    }
+
+    const status = String(session.status ?? "").toLowerCase();
+    const limitedUntil = this.toValidDate(session.limitedUntil);
+    const limitedActive =
+      status === "limited" &&
+      Boolean(limitedUntil && limitedUntil.getTime() > nowMs);
+
+    if (!limitedActive || !limitedUntil) {
+      return { active: false };
+    }
+
+    const scope =
+      session.limitedScope === "minute" ||
+      session.limitedScope === "hour" ||
+      session.limitedScope === "day"
+        ? session.limitedScope
+        : "minute";
+
+    whatsappClient.status = "limited";
+    whatsappClient.limitedUntil = limitedUntil;
+    whatsappClient.limitedScope = scope;
+    whatsappClient.limitedReason =
+      session.limitedReason ?? whatsappClient.limitedReason ?? "rate_limited";
+    whatsappClient.lastVerifiedAt = new Date(nowMs);
+    whatsappClient.lastVerifiedOk = true;
+    whatsappClient.lastVerifyError = undefined;
+
+    return {
+      active: true,
+      error: `rate_limited_${scope}`,
+    };
+  }
+
   private async clearSessionRateLimitState(
     sessionId: string,
     whatsappClient: WhatsAppClient
@@ -3401,6 +3445,15 @@ class WhatsAppManager {
     }
 
     try {
+      const persisted = await storage.getSession(sessionId);
+      const persistedRateLimit = this.applyPersistedRateLimitState(
+        whatsappClient,
+        persisted
+      );
+      if (persistedRateLimit.active) {
+        return { ok: false, error: persistedRateLimit.error };
+      }
+
       const result = await this.verifyConnectedState(
         sessionId,
         whatsappClient.client,
@@ -3422,6 +3475,7 @@ class WhatsAppManager {
   async verifyNow(): Promise<VerifyNowResult> {
     const timeoutMs = 5000;
     const sessions = await storage.getSessions();
+    const sessionById = new Map(sessions.map((session) => [session.id, session]));
     const phoneById = new Map(
       sessions.map((session) => [session.id, session.phoneNumber ?? null])
     );
@@ -3436,6 +3490,15 @@ class WhatsAppManager {
       let error: string | undefined;
 
       try {
+        const persisted = sessionById.get(sessionId);
+        const persistedRateLimit = this.applyPersistedRateLimitState(
+          whatsappClient,
+          persisted
+        );
+        if (persistedRateLimit.active) {
+          ok = false;
+          error = persistedRateLimit.error;
+        } else {
         const result = await this.verifyConnectedState(
           sessionId,
           whatsappClient.client,
@@ -3447,6 +3510,7 @@ class WhatsAppManager {
         );
         ok = result.ok;
         error = result.error;
+        }
       } catch (err: any) {
         ok = false;
         error = err?.message ?? String(err);

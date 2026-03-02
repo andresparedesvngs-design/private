@@ -2311,11 +2311,11 @@ class CampaignEngine {
     return normalized;
   }
 
-  private async getRefillCandidates(pool: Pool): Promise<string[]> {
-    const connected = this.getAllConnectedSessions();
-    if (connected.length === 0) {
-      return [];
-    }
+  private async getRefillCandidates(
+    campaignId: string,
+    pool: Pool,
+    needed: number
+  ): Promise<string[]> {
     const nowMs = Date.now();
 
     const assignedToOtherPools = new Set<string>();
@@ -2335,7 +2335,7 @@ class CampaignEngine {
       }
     }
 
-    return connected.filter((sessionId) => {
+    const isEligibleCandidate = (sessionId: string): boolean => {
       if (pool.sessionIds.includes(sessionId)) {
         return false;
       }
@@ -2367,7 +2367,67 @@ class CampaignEngine {
       }
 
       return true;
-    });
+    };
+
+    const verifiedConnected = this.getAllConnectedSessions().filter((sessionId) =>
+      isEligibleCandidate(sessionId)
+    );
+
+    const alreadyVerified = new Set(verifiedConnected);
+    const connectedUnverifiedCandidates = allSessions
+      .filter((session) => String(session.status ?? "").toLowerCase() === "connected")
+      .map((session) => session.id)
+      .filter(
+        (sessionId) =>
+          !alreadyVerified.has(sessionId) &&
+          isEligibleCandidate(sessionId) &&
+          whatsappManager.isSessionConnected(sessionId)
+      );
+
+    if (connectedUnverifiedCandidates.length === 0) {
+      return verifiedConnected;
+    }
+
+    const fullPoolPreverify = this.getCampaignPreverifyFullPool();
+    const defaultProbe = Math.max(this.getCampaignPreverifySessionCount(), needed);
+    const probeLimit = fullPoolPreverify
+      ? connectedUnverifiedCandidates.length
+      : Math.min(
+          connectedUnverifiedCandidates.length,
+          Math.max(defaultProbe * 2, 1)
+        );
+    const probeIds = connectedUnverifiedCandidates.slice(0, probeLimit);
+    const concurrency = this.getCampaignPreverifyConcurrency();
+    const recoveredIds: string[] = [];
+
+    for (let index = 0; index < probeIds.length; index += concurrency) {
+      const batch = probeIds.slice(index, index + concurrency);
+      const results = await Promise.all(
+        batch.map((sessionId) => whatsappManager.verifySessionNow(sessionId, 5000))
+      );
+      for (let i = 0; i < batch.length; i += 1) {
+        if (results[i]?.ok) {
+          recoveredIds.push(batch[i]);
+        }
+      }
+    }
+
+    if (recoveredIds.length > 0) {
+      await storage.createSystemLog({
+        level: "info",
+        source: "campaign",
+        message: `Recovered verified refill candidates (${recoveredIds.length}/${probeIds.length})`,
+        metadata: {
+          campaignId,
+          poolId: pool.id,
+          recoveredIds,
+          probeIds,
+          fullPoolPreverify,
+        },
+      });
+    }
+
+    return [...verifiedConnected, ...recoveredIds.filter((id) => !alreadyVerified.has(id))];
   }
 
   private async refillPoolToTargetSessionCount(
@@ -2388,12 +2448,12 @@ class CampaignEngine {
       return [];
     }
 
-    const candidates = await this.getRefillCandidates(pool);
+    const needed = target - currentSize;
+    const candidates = await this.getRefillCandidates(campaignId, pool, needed);
     if (candidates.length === 0) {
       return [];
     }
 
-    const needed = target - currentSize;
     const toAdd = candidates.slice(0, needed);
     if (toAdd.length === 0) {
       return [];
