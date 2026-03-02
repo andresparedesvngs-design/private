@@ -438,6 +438,21 @@ export async function registerRoutes(
       };
     }
 
+    if (session.status === "connected") {
+      return {
+        sessionId,
+        ok: false,
+        category: "skipped",
+        reason: "already_connected",
+        httpStatus: 409,
+        body: {
+          error: "already_connected",
+          message: "Session is already connected",
+          sessionId,
+        },
+      };
+    }
+
     if (session.status === "auth_failed") {
       return {
         sessionId,
@@ -571,10 +586,13 @@ export async function registerRoutes(
     runId: number,
     startedAtIso: string
   ): Promise<ReconnectAllSummary> => {
+    const connectedSessions = sessions.filter((session) => session.status === "connected");
+    const reconnectTargets = sessions.filter((session) => session.status !== "connected");
+
     const proxyOverrides = new Map<string, any>();
     const uniqueProxyIds = Array.from(
       new Set(
-        sessions
+        reconnectTargets
           .map((session) =>
             session.proxyServerId ? String(session.proxyServerId) : ""
           )
@@ -594,8 +612,8 @@ export async function registerRoutes(
       })
     );
 
-    const results = await mapWithConcurrency(
-      sessions,
+    const reconnectResults = await mapWithConcurrency(
+      reconnectTargets,
       RECONNECT_ALL_CONCURRENCY,
       async (session) => {
         const result = await reconnectSingleSession(session.id, {
@@ -620,6 +638,16 @@ export async function registerRoutes(
         };
       }
     );
+
+    const connectedResults = connectedSessions.map((session) => ({
+      sessionId: session.id,
+      status: "skipped" as const,
+      reason: "already_connected",
+      message: "Session is already connected",
+      details: null,
+    }));
+
+    const results = [...connectedResults, ...reconnectResults];
 
     const reconnected = results.filter((item) => item.status === "reconnected").length;
     const skipped = results.filter((item) => item.status === "skipped").length;
