@@ -438,7 +438,10 @@ export async function registerRoutes(
       };
     }
 
-    if (session.status === "connected") {
+    const runtimeSession = whatsappManager.getSession(sessionId);
+    const isRuntimeConnected = runtimeSession?.status === "connected";
+
+    if (session.status === "connected" && isRuntimeConnected) {
       return {
         sessionId,
         ok: false,
@@ -586,8 +589,20 @@ export async function registerRoutes(
     runId: number,
     startedAtIso: string
   ): Promise<ReconnectAllSummary> => {
-    const connectedSessions = sessions.filter((session) => session.status === "connected");
-    const reconnectTargets = sessions.filter((session) => session.status !== "connected");
+    const connectedSessions = sessions.filter((session) => {
+      if (session.status !== "connected") {
+        return false;
+      }
+      const runtimeSession = whatsappManager.getSession(session.id);
+      return runtimeSession?.status === "connected";
+    });
+    const reconnectTargets = sessions.filter((session) => {
+      if (session.status !== "connected") {
+        return true;
+      }
+      const runtimeSession = whatsappManager.getSession(session.id);
+      return runtimeSession?.status !== "connected";
+    });
 
     const proxyOverrides = new Map<string, any>();
     const uniqueProxyIds = Array.from(
