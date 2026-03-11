@@ -218,6 +218,15 @@ export async function registerRoutes(
     verifiedAt: Date;
   };
 
+  type VerifyProgressContext = {
+    runId: string | null;
+    batchId: string | null;
+    processedBase: number;
+    total: number;
+    verifiedBase: number;
+    failedBase: number;
+  };
+
   const withTimeout = async <T>(
     promise: Promise<T>,
     timeoutMs: number,
@@ -717,7 +726,8 @@ export async function registerRoutes(
 
   const verifyDebtorsWithSession = async (
     sessionId: string,
-    debtors: VerifyDebtorInput[]
+    debtors: VerifyDebtorInput[],
+    onItemProcessed?: (result: VerifyDebtorResult) => void
   ): Promise<VerifyDebtorResult[]> => {
     const results: VerifyDebtorResult[] = [];
     const session = whatsappManager.getSession(sessionId);
@@ -729,14 +739,18 @@ export async function registerRoutes(
         metadata: { sessionId },
       });
       const now = new Date();
-      return debtors.map((debtor) => ({
-        rut: debtor.rut ?? null,
-        phone: debtor.phone,
-        whatsapp: false,
-        wa_id: null,
-        verifiedBy: sessionId,
-        verifiedAt: now,
-      }));
+      return debtors.map((debtor) => {
+        const item = {
+          rut: debtor.rut ?? null,
+          phone: debtor.phone,
+          whatsapp: false,
+          wa_id: null,
+          verifiedBy: sessionId,
+          verifiedAt: now,
+        };
+        onItemProcessed?.(item);
+        return item;
+      });
     }
 
     const client = session.client as any;
@@ -748,14 +762,16 @@ export async function registerRoutes(
       try {
         const normalized = whatsappManager.normalizePhoneForWhatsapp(debtor.phone);
         if (!normalized) {
-          results.push({
+          const item = {
             rut: debtor.rut ?? null,
             phone: debtor.phone,
             whatsapp: false,
             wa_id: null,
             verifiedBy: sessionId,
             verifiedAt,
-          });
+          };
+          results.push(item);
+          onItemProcessed?.(item);
           continue;
         }
 
@@ -765,25 +781,29 @@ export async function registerRoutes(
           "getNumberId"
         );
         const waId = extractWaId(numberId);
-        results.push({
+        const item = {
           rut: debtor.rut ?? null,
           phone: debtor.phone,
           whatsapp: Boolean(waId),
           wa_id: waId,
           verifiedBy: sessionId,
           verifiedAt,
-        });
+        };
+        results.push(item);
+        onItemProcessed?.(item);
       } catch (error: any) {
         errorCount += 1;
         lastError = error?.message ?? String(error);
-        results.push({
+        const item = {
           rut: debtor.rut ?? null,
           phone: debtor.phone,
           whatsapp: false,
           wa_id: null,
           verifiedBy: sessionId,
           verifiedAt,
-        });
+        };
+        results.push(item);
+        onItemProcessed?.(item);
       }
     }
 
@@ -1779,6 +1799,11 @@ export async function registerRoutes(
         batchId: z.string().optional(),
         complete: z.boolean().optional(),
         persist: z.boolean().optional(),
+        runId: z.string().optional(),
+        progressBase: z.number().int().nonnegative().optional(),
+        progressTotal: z.number().int().positive().optional(),
+        progressVerifiedBase: z.number().int().nonnegative().optional(),
+        progressFailedBase: z.number().int().nonnegative().optional(),
       });
 
       const payload = schema.parse(req.body ?? {});
@@ -1816,37 +1841,21 @@ export async function registerRoutes(
         });
       }
 
-      const assignments = splitDebtorsAcrossSessions(
-        payload.debtors,
-        poolSessionIds
-      );
-
-      const resultsBySession = await Promise.all(
-        poolSessionIds.map((sessionId) =>
-          verifyDebtorsWithSession(sessionId, assignments.get(sessionId) ?? [])
-        )
-      );
-
-      const results = resultsBySession.flat();
-      const verifiedCount = results.filter((item) => item.whatsapp).length;
-      const failedCount = results.length - verifiedCount;
-      const exportFlag =
-        payload.export === true ||
-        String(req.query.export ?? "").toLowerCase() === "xlsx";
-
       const shouldPersist = payload.persist !== false;
       let batchId = payload.batchId;
+      let batch = batchId
+        ? await storage.getWhatsAppVerificationBatch(batchId)
+        : undefined;
 
       if (shouldPersist) {
-        let batch = batchId
-          ? await storage.getWhatsAppVerificationBatch(batchId)
-          : undefined;
-
         if (batchId && !batch) {
           return res.status(404).json({ error: "Verification batch not found" });
         }
         if (batch?.status === "cancelled") {
           return res.status(409).json({ error: "Verification batch is cancelled" });
+        }
+        if (batch?.status === "paused") {
+          return res.status(409).json({ error: "Verification batch is paused" });
         }
 
         if (!batch) {
@@ -1861,7 +1870,91 @@ export async function registerRoutes(
           batchId = createdBatch.id;
           batch = createdBatch;
         }
+      }
 
+      const progressContext: VerifyProgressContext = {
+        runId:
+          typeof payload.runId === "string" && payload.runId.trim()
+            ? payload.runId.trim()
+            : null,
+        batchId: batchId ?? null,
+        processedBase:
+          Number.isFinite(payload.progressBase) && (payload.progressBase ?? 0) >= 0
+            ? Number(payload.progressBase)
+            : 0,
+        total:
+          Number.isFinite(payload.progressTotal) && (payload.progressTotal ?? 0) > 0
+            ? Number(payload.progressTotal)
+            : payload.debtors.length,
+        verifiedBase:
+          Number.isFinite(payload.progressVerifiedBase) &&
+          (payload.progressVerifiedBase ?? 0) >= 0
+            ? Number(payload.progressVerifiedBase)
+            : 0,
+        failedBase:
+          Number.isFinite(payload.progressFailedBase) &&
+          (payload.progressFailedBase ?? 0) >= 0
+            ? Number(payload.progressFailedBase)
+            : 0,
+      };
+
+      if (progressContext.total < progressContext.processedBase + payload.debtors.length) {
+        progressContext.total = progressContext.processedBase + payload.debtors.length;
+      }
+
+      let progressProcessed = 0;
+      let progressVerified = 0;
+      let progressFailed = 0;
+      const emitVerificationProgress = (item: VerifyDebtorResult) => {
+        progressProcessed += 1;
+        if (item.whatsapp) {
+          progressVerified += 1;
+        } else {
+          progressFailed += 1;
+        }
+
+        io.emit("whatsapp-verification:progress", {
+          runId: progressContext.runId,
+          batchId: progressContext.batchId,
+          processed: Math.min(
+            progressContext.processedBase + progressProcessed,
+            progressContext.total
+          ),
+          total: progressContext.total,
+          verified: progressContext.verifiedBase + progressVerified,
+          failed: progressContext.failedBase + progressFailed,
+          rut: item.rut ?? null,
+          phone: item.phone,
+          whatsapp: item.whatsapp,
+          wa_id: item.wa_id,
+          verifiedBy: item.verifiedBy ?? null,
+          verifiedAt: item.verifiedAt.toISOString(),
+        });
+      };
+
+      const assignments = splitDebtorsAcrossSessions(
+        payload.debtors,
+        poolSessionIds
+      );
+
+      const resultsBySession = await Promise.all(
+        poolSessionIds.map((sessionId) =>
+          verifyDebtorsWithSession(
+            sessionId,
+            assignments.get(sessionId) ?? [],
+            emitVerificationProgress
+          )
+        )
+      );
+
+      const results = resultsBySession.flat();
+      const verifiedCount = results.filter((item) => item.whatsapp).length;
+      const failedCount = results.length - verifiedCount;
+      const exportFlag =
+        payload.export === true ||
+        String(req.query.export ?? "").toLowerCase() === "xlsx";
+
+      if (shouldPersist) {
         const items = results.map((item) => ({
           batchId: batchId!,
           poolId: pool.id,

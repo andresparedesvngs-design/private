@@ -53,6 +53,7 @@ import {
   useCancelWhatsAppVerificationBatch,
   useDeleteWhatsAppVerificationBatch,
 } from "@/lib/api";
+import { getSocket } from "@/lib/socket";
 import type { Debtor } from "@shared/schema";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
@@ -112,6 +113,7 @@ export default function Debtors() {
   const [verifyRunning, setVerifyRunning] = useState(false);
   const [verifyPaused, setVerifyPaused] = useState(false);
   const [verifyNextIndex, setVerifyNextIndex] = useState(0);
+  const [verifyRunId, setVerifyRunId] = useState<string | null>(null);
   const verifyControlRef = useRef({ pauseRequested: false, cancelRequested: false });
 
   const clearVerificationState = () => {
@@ -124,6 +126,7 @@ export default function Debtors() {
     setVerifyRunning(false);
     setVerifyPaused(false);
     setVerifyNextIndex(0);
+    setVerifyRunId(null);
     verifyControlRef.current = { pauseRequested: false, cancelRequested: false };
     localStorage.removeItem(VERIFY_DRAFT_STORAGE_KEY);
   };
@@ -151,6 +154,7 @@ export default function Debtors() {
         paused?: boolean;
         running?: boolean;
         nextIndex?: number;
+        runId?: string | null;
       };
 
       setVerifyPoolId(draft.poolId ?? "");
@@ -167,6 +171,7 @@ export default function Debtors() {
         failed: Math.max(0, Number(draft.summary?.failed ?? 0) || 0),
       });
       setVerifyNextIndex(Math.max(0, Number(draft.nextIndex ?? 0) || 0));
+      setVerifyRunId(draft.runId ?? null);
       // Any in-flight run is considered paused after navigation/reload.
       setVerifyPaused(Boolean(draft.paused || draft.running));
       setVerifyRunning(false);
@@ -188,6 +193,7 @@ export default function Debtors() {
       paused: verifyPaused,
       running: verifyRunning,
       nextIndex: verifyNextIndex,
+      runId: verifyRunId,
     };
     try {
       localStorage.setItem(VERIFY_DRAFT_STORAGE_KEY, JSON.stringify(draft));
@@ -206,7 +212,43 @@ export default function Debtors() {
     verifyPaused,
     verifyRunning,
     verifyNextIndex,
+    verifyRunId,
   ]);
+
+  useEffect(() => {
+    const socket = getSocket();
+    const handleVerificationProgress = (payload: any) => {
+      if (!verifyRunning) return;
+      if (!payload || typeof payload !== "object") return;
+      if (!verifyRunId || payload.runId !== verifyRunId) return;
+
+      const processed = Number(payload.processed ?? 0);
+      const total = Number(payload.total ?? verifyTargets.length);
+      if (Number.isFinite(processed) && Number.isFinite(total) && total > 0) {
+        const normalizedProcessed = Math.max(0, Math.min(Math.floor(processed), Math.floor(total)));
+        const normalizedTotal = Math.max(1, Math.floor(total));
+        setVerifyProgress({
+          processed: normalizedProcessed,
+          total: normalizedTotal,
+        });
+        setVerifyNextIndex(normalizedProcessed);
+      }
+
+      const verified = Number(payload.verified ?? Number.NaN);
+      const failed = Number(payload.failed ?? Number.NaN);
+      if (Number.isFinite(verified) && Number.isFinite(failed)) {
+        setVerifySummary({
+          verified: Math.max(0, Math.floor(verified)),
+          failed: Math.max(0, Math.floor(failed)),
+        });
+      }
+    };
+
+    socket.on("whatsapp-verification:progress", handleVerificationProgress);
+    return () => {
+      socket.off("whatsapp-verification:progress", handleVerificationProgress);
+    };
+  }, [verifyRunning, verifyRunId, verifyTargets.length]);
 
   useEffect(() => {
     return () => {
@@ -905,6 +947,7 @@ export default function Debtors() {
       setVerifyPaused(false);
       setVerifyRunning(false);
       setVerifyNextIndex(0);
+      setVerifyRunId(null);
       verifyControlRef.current = { pauseRequested: false, cancelRequested: false };
     } catch (error: any) {
       console.error("Failed to parse verification file:", error);
@@ -938,10 +981,17 @@ export default function Debtors() {
       setVerifyBatchId(null);
       setVerifyNextIndex(0);
     }
+    let activeRunId =
+      verifyRunId && startIndex > 0
+        ? verifyRunId
+        : `verify-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    setVerifyRunId(activeRunId);
 
     verifyControlRef.current = { pauseRequested: false, cancelRequested: false };
     setVerifyRunning(true);
     setVerifyPaused(false);
+    let verifiedAcc = startIndex > 0 ? Math.max(0, verifySummary.verified) : 0;
+    let failedAcc = startIndex > 0 ? Math.max(0, verifySummary.failed) : 0;
 
     if (startIndex === 0) {
       setVerifyPreview([]);
@@ -973,6 +1023,11 @@ export default function Debtors() {
           batchId: batchId ?? undefined,
           complete: isLastChunk,
           persist: true,
+          runId: activeRunId,
+          progressBase: cursor,
+          progressTotal: verifyTargets.length,
+          progressVerifiedBase: verifiedAcc,
+          progressFailedBase: failedAcc,
         });
 
         if (response.batchId) {
@@ -1000,10 +1055,12 @@ export default function Debtors() {
           processed: nextProcessed,
           total: verifyTargets.length,
         });
-        setVerifySummary((prev) => ({
-          verified: prev.verified + response.verified,
-          failed: prev.failed + response.failed,
-        }));
+        verifiedAcc += response.verified;
+        failedAcc += response.failed;
+        setVerifySummary({
+          verified: verifiedAcc,
+          failed: failedAcc,
+        });
       }
 
       if (verifyControlRef.current.cancelRequested) {

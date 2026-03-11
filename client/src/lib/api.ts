@@ -682,12 +682,22 @@ export function useVerifyDebtorsWhatsApp() {
       batchId,
       complete,
       persist,
+      runId,
+      progressBase,
+      progressTotal,
+      progressVerifiedBase,
+      progressFailedBase,
     }: {
       poolId: string;
       debtors: Array<{ rut?: string | null; phone: string }>;
       batchId?: string;
       complete?: boolean;
       persist?: boolean;
+      runId?: string;
+      progressBase?: number;
+      progressTotal?: number;
+      progressVerifiedBase?: number;
+      progressFailedBase?: number;
     }) =>
       fetchApi<{
         batchId: string | null;
@@ -709,6 +719,11 @@ export function useVerifyDebtorsWhatsApp() {
           batchId,
           complete,
           persist,
+          runId,
+          progressBase,
+          progressTotal,
+          progressVerifiedBase,
+          progressFailedBase,
         }),
       }),
   });
