@@ -1788,14 +1788,27 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Pool not found" });
       }
 
+      const poolConfiguredSessions = Array.from(new Set(pool.sessionIds ?? []));
       const verifiedInMemory = new Set(
         whatsappManager.getVerifiedConnectedSessionIdsWithOptions({
           includeNotify: false,
+          // Larger window prevents long multi-chunk runs from dropping all sessions mid-process.
+          maxAgeMs: 15 * 60 * 1000,
         })
       );
-      const poolSessionIds = Array.from(
-        new Set((pool.sessionIds ?? []).filter((id) => verifiedInMemory.has(id)))
+      const connectedInMemory = new Set(
+        whatsappManager.getConnectedSessionIdsWithOptions({
+          includeNotify: false,
+        })
       );
+      let poolSessionIds = poolConfiguredSessions.filter((id) =>
+        verifiedInMemory.has(id)
+      );
+      if (poolSessionIds.length === 0) {
+        poolSessionIds = poolConfiguredSessions.filter((id) =>
+          connectedInMemory.has(id)
+        );
+      }
 
       if (poolSessionIds.length === 0) {
         return res.status(400).json({
@@ -1832,6 +1845,9 @@ export async function registerRoutes(
         if (batchId && !batch) {
           return res.status(404).json({ error: "Verification batch not found" });
         }
+        if (batch?.status === "cancelled") {
+          return res.status(409).json({ error: "Verification batch is cancelled" });
+        }
 
         if (!batch) {
           const createdBatch = await storage.createWhatsAppVerificationBatch({
@@ -1860,11 +1876,12 @@ export async function registerRoutes(
         await storage.createWhatsAppVerifications(items);
 
         const shouldComplete = payload.complete ?? !payload.batchId;
+        const nextStatus = shouldComplete ? "completed" : "running";
         await storage.updateWhatsAppVerificationBatch(batchId!, {
           total: (batch?.total ?? 0) + results.length,
           verified: (batch?.verified ?? 0) + verifiedCount,
           failed: (batch?.failed ?? 0) + failedCount,
-          status: shouldComplete ? "completed" : "running",
+          status: nextStatus,
         });
       }
 
@@ -1974,6 +1991,86 @@ export async function registerRoutes(
         `attachment; filename="verificacion_whatsapp_${req.params.batchId}.xlsx"`
       );
       res.send(buffer);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/whatsapp-verifications/:batchId/pause", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const batch = await storage.getWhatsAppVerificationBatch(req.params.batchId);
+      if (!batch) {
+        return res.status(404).json({ error: "Verification batch not found" });
+      }
+      if (batch.status === "completed" || batch.status === "cancelled") {
+        return res.status(409).json({ error: `Cannot pause batch in status ${batch.status}` });
+      }
+      const updated = await storage.updateWhatsAppVerificationBatch(batch.id, {
+        status: "paused",
+      });
+      res.json(updated);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/whatsapp-verifications/:batchId/resume", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const batch = await storage.getWhatsAppVerificationBatch(req.params.batchId);
+      if (!batch) {
+        return res.status(404).json({ error: "Verification batch not found" });
+      }
+      if (batch.status === "completed" || batch.status === "cancelled") {
+        return res.status(409).json({ error: `Cannot resume batch in status ${batch.status}` });
+      }
+      const updated = await storage.updateWhatsAppVerificationBatch(batch.id, {
+        status: "running",
+      });
+      res.json(updated);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/whatsapp-verifications/:batchId/cancel", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const batch = await storage.getWhatsAppVerificationBatch(req.params.batchId);
+      if (!batch) {
+        return res.status(404).json({ error: "Verification batch not found" });
+      }
+      if (batch.status === "completed") {
+        return res.status(409).json({ error: "Cannot cancel a completed batch" });
+      }
+      const updated = await storage.updateWhatsAppVerificationBatch(batch.id, {
+        status: "cancelled",
+      });
+      res.json(updated);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/whatsapp-verifications/:batchId", async (req, res) => {
+    try {
+      if (!ensureRole(req, res, ["admin", "supervisor"])) {
+        return;
+      }
+      const batch = await storage.getWhatsAppVerificationBatch(req.params.batchId);
+      if (!batch) {
+        return res.status(404).json({ error: "Verification batch not found" });
+      }
+      await storage.deleteWhatsAppVerificationResults(req.params.batchId);
+      await storage.deleteWhatsAppVerificationBatch(req.params.batchId);
+      res.status(204).send();
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

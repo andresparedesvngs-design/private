@@ -141,6 +141,8 @@ export interface IStorage {
     limit?: number,
     skip?: number
   ): Promise<WhatsAppVerification[]>;
+  deleteWhatsAppVerificationResults(batchId: string): Promise<number>;
+  deleteWhatsAppVerificationBatch(id: string): Promise<boolean>;
   
   resetDebtorsStatus(): Promise<number>;
   cleanupDebtors(statuses?: string[]): Promise<number>;
@@ -1829,6 +1831,18 @@ export class MongoStorage implements IStorage {
     if (limit > 0) query.limit(limit);
     const results = await query;
     return results.map((item) => this.transformWhatsAppVerification(item));
+  }
+
+  async deleteWhatsAppVerificationResults(batchId: string): Promise<number> {
+    if (!mongoose.isValidObjectId(batchId)) return 0;
+    const result = await WhatsAppVerificationModel.deleteMany({ batchId });
+    return result.deletedCount ?? 0;
+  }
+
+  async deleteWhatsAppVerificationBatch(id: string): Promise<boolean> {
+    if (!mongoose.isValidObjectId(id)) return false;
+    const result = await WhatsAppVerificationBatchModel.deleteOne({ _id: id });
+    return (result.deletedCount ?? 0) > 0;
   }
 }
 

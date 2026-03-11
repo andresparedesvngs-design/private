@@ -215,7 +215,7 @@ export const insertWhatsAppVerificationBatchSchema = z.object({
   total: z.number().int().nonnegative().default(0),
   verified: z.number().int().nonnegative().default(0),
   failed: z.number().int().nonnegative().default(0),
-  status: z.enum(["running", "completed"]).default("completed"),
+  status: z.enum(["running", "paused", "completed", "cancelled"]).default("completed"),
 });
 
 export const insertWhatsAppVerificationSchema = z.object({
@@ -434,7 +434,7 @@ const whatsappVerificationBatchSchema = new mongoose.Schema({
   total: { type: Number, default: 0 },
   verified: { type: Number, default: 0 },
   failed: { type: Number, default: 0 },
-  status: { type: String, enum: ["running", "completed"], default: "completed" },
+  status: { type: String, enum: ["running", "paused", "completed", "cancelled"], default: "completed" },
 }, { timestamps: true });
 
 const whatsappVerificationSchema = new mongoose.Schema({
@@ -690,7 +690,7 @@ export type WhatsAppVerificationBatch = BaseDocument & {
   total: number;
   verified: number;
   failed: number;
-  status: "running" | "completed";
+  status: "running" | "paused" | "completed" | "cancelled";
 };
 
 export type InsertWhatsAppVerification = z.infer<

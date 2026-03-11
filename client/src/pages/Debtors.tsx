@@ -22,7 +22,10 @@ import {
   Users,
   Trash2,
   Plus,
-  RotateCcw
+  RotateCcw,
+  Pause,
+  Play,
+  Square
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -45,10 +48,16 @@ import {
   usePools,
   useVerifyDebtorsWhatsApp,
   useWhatsAppVerificationBatches,
+  usePauseWhatsAppVerificationBatch,
+  useResumeWhatsAppVerificationBatch,
+  useCancelWhatsAppVerificationBatch,
+  useDeleteWhatsAppVerificationBatch,
 } from "@/lib/api";
 import type { Debtor } from "@shared/schema";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
+
+const VERIFY_DRAFT_STORAGE_KEY = "debtors:whatsapp-verification-draft:v1";
 
 export default function Debtors() {
   const { data: user } = useAuthMe();
@@ -66,6 +75,10 @@ export default function Debtors() {
   const { data: executives } = useExecutives(isSupervisorOrAdmin);
   const { data: pools } = usePools(isSupervisorOrAdmin);
   const verifyDebtorsWhatsApp = useVerifyDebtorsWhatsApp();
+  const pauseVerificationBatch = usePauseWhatsAppVerificationBatch();
+  const resumeVerificationBatch = useResumeWhatsAppVerificationBatch();
+  const cancelVerificationBatch = useCancelWhatsAppVerificationBatch();
+  const deleteVerificationBatch = useDeleteWhatsAppVerificationBatch();
   const { data: verificationBatches, refetch: refetchVerificationBatches } =
     useWhatsAppVerificationBatches(isSupervisorOrAdmin, 20);
   
@@ -97,6 +110,111 @@ export default function Debtors() {
   const [verifyProgress, setVerifyProgress] = useState({ processed: 0, total: 0 });
   const [verifySummary, setVerifySummary] = useState({ verified: 0, failed: 0 });
   const [verifyRunning, setVerifyRunning] = useState(false);
+  const [verifyPaused, setVerifyPaused] = useState(false);
+  const [verifyNextIndex, setVerifyNextIndex] = useState(0);
+  const verifyControlRef = useRef({ pauseRequested: false, cancelRequested: false });
+
+  const clearVerificationState = () => {
+    setVerifyFileName("");
+    setVerifyTargets([]);
+    setVerifyBatchId(null);
+    setVerifyPreview([]);
+    setVerifySummary({ verified: 0, failed: 0 });
+    setVerifyProgress({ processed: 0, total: 0 });
+    setVerifyRunning(false);
+    setVerifyPaused(false);
+    setVerifyNextIndex(0);
+    verifyControlRef.current = { pauseRequested: false, cancelRequested: false };
+    localStorage.removeItem(VERIFY_DRAFT_STORAGE_KEY);
+  };
+
+  useEffect(() => {
+    if (!isSupervisorOrAdmin) return;
+    try {
+      const raw = localStorage.getItem(VERIFY_DRAFT_STORAGE_KEY);
+      if (!raw) return;
+      const draft = JSON.parse(raw) as {
+        poolId?: string;
+        fileName?: string;
+        targets?: Array<{ rut?: string | null; phone: string }>;
+        batchId?: string | null;
+        preview?: Array<{
+          rut: string | null;
+          phone: string;
+          whatsapp: boolean;
+          wa_id: string | null;
+          verifiedBy: string | null;
+          verifiedAt: string;
+        }>;
+        progress?: { processed: number; total: number };
+        summary?: { verified: number; failed: number };
+        paused?: boolean;
+        running?: boolean;
+        nextIndex?: number;
+      };
+
+      setVerifyPoolId(draft.poolId ?? "");
+      setVerifyFileName(draft.fileName ?? "");
+      setVerifyTargets(Array.isArray(draft.targets) ? draft.targets : []);
+      setVerifyBatchId(draft.batchId ?? null);
+      setVerifyPreview(Array.isArray(draft.preview) ? draft.preview.slice(0, 200) : []);
+      setVerifyProgress({
+        processed: Math.max(0, Number(draft.progress?.processed ?? 0) || 0),
+        total: Math.max(0, Number(draft.progress?.total ?? 0) || 0),
+      });
+      setVerifySummary({
+        verified: Math.max(0, Number(draft.summary?.verified ?? 0) || 0),
+        failed: Math.max(0, Number(draft.summary?.failed ?? 0) || 0),
+      });
+      setVerifyNextIndex(Math.max(0, Number(draft.nextIndex ?? 0) || 0));
+      // Any in-flight run is considered paused after navigation/reload.
+      setVerifyPaused(Boolean(draft.paused || draft.running));
+      setVerifyRunning(false);
+    } catch (error) {
+      console.error("Failed to restore WhatsApp verification draft:", error);
+    }
+  }, [isSupervisorOrAdmin]);
+
+  useEffect(() => {
+    if (!isSupervisorOrAdmin) return;
+    const draft = {
+      poolId: verifyPoolId,
+      fileName: verifyFileName,
+      targets: verifyTargets,
+      batchId: verifyBatchId,
+      preview: verifyPreview.slice(0, 200),
+      progress: verifyProgress,
+      summary: verifySummary,
+      paused: verifyPaused,
+      running: verifyRunning,
+      nextIndex: verifyNextIndex,
+    };
+    try {
+      localStorage.setItem(VERIFY_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    } catch (error) {
+      console.error("Failed to persist WhatsApp verification draft:", error);
+    }
+  }, [
+    isSupervisorOrAdmin,
+    verifyPoolId,
+    verifyFileName,
+    verifyTargets,
+    verifyBatchId,
+    verifyPreview,
+    verifyProgress,
+    verifySummary,
+    verifyPaused,
+    verifyRunning,
+    verifyNextIndex,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (verifyRunning) {
+        verifyControlRef.current.pauseRequested = true;
+      }
+    };
+  }, [verifyRunning]);
   
   const filteredDebtors = debtors?.filter(d => 
     d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -784,6 +902,10 @@ export default function Debtors() {
       setVerifyPreview([]);
       setVerifySummary({ verified: 0, failed: 0 });
       setVerifyProgress({ processed: 0, total: targets.length });
+      setVerifyPaused(false);
+      setVerifyRunning(false);
+      setVerifyNextIndex(0);
+      verifyControlRef.current = { pauseRequested: false, cancelRequested: false };
     } catch (error: any) {
       console.error("Failed to parse verification file:", error);
       alert(error?.message ?? "Error al leer el archivo");
@@ -808,27 +930,54 @@ export default function Debtors() {
     }
 
     const chunkSize = 200;
-    const chunks = chunkArray(verifyTargets, chunkSize);
-    let batchId: string | null = null;
+    let startIndex = Math.max(0, Math.min(verifyNextIndex, verifyTargets.length));
+    let batchId: string | null = verifyBatchId ?? null;
+    if (startIndex >= verifyTargets.length) {
+      startIndex = 0;
+      batchId = null;
+      setVerifyBatchId(null);
+      setVerifyNextIndex(0);
+    }
 
+    verifyControlRef.current = { pauseRequested: false, cancelRequested: false };
     setVerifyRunning(true);
-    setVerifyPreview([]);
-    setVerifySummary({ verified: 0, failed: 0 });
-    setVerifyProgress({ processed: 0, total: verifyTargets.length });
+    setVerifyPaused(false);
+
+    if (startIndex === 0) {
+      setVerifyPreview([]);
+      setVerifySummary({ verified: 0, failed: 0 });
+      setVerifyProgress({ processed: 0, total: verifyTargets.length });
+    } else {
+      setVerifyProgress((prev) => ({
+        processed: Math.min(prev.processed, verifyTargets.length),
+        total: verifyTargets.length,
+      }));
+    }
 
     try {
-      for (let i = 0; i < chunks.length; i++) {
-        const isLast = i === chunks.length - 1;
+      if (batchId && startIndex > 0) {
+        await resumeVerificationBatch.mutateAsync(batchId);
+      }
+
+      for (let cursor = startIndex; cursor < verifyTargets.length; cursor += chunkSize) {
+        if (verifyControlRef.current.cancelRequested || verifyControlRef.current.pauseRequested) {
+          break;
+        }
+
+        const chunk = verifyTargets.slice(cursor, cursor + chunkSize);
+        const isLastChunk = cursor + chunk.length >= verifyTargets.length;
+
         const response = await verifyDebtorsWhatsApp.mutateAsync({
           poolId: verifyPoolId,
-          debtors: chunks[i],
+          debtors: chunk,
           batchId: batchId ?? undefined,
-          complete: isLast,
+          complete: isLastChunk,
           persist: true,
         });
 
         if (response.batchId) {
           batchId = response.batchId;
+          setVerifyBatchId(response.batchId);
         }
 
         const nextPreview = response.results.map((item) => ({
@@ -842,21 +991,35 @@ export default function Debtors() {
 
         setVerifyPreview((prev) => {
           const combined = [...prev, ...nextPreview];
-          return combined.slice(0, 200);
+          return combined.slice(-200);
         });
 
-        setVerifyProgress((prev) => ({
-          processed: Math.min(prev.processed + response.checked, verifyTargets.length),
-          total: prev.total,
-        }));
-
+        const nextProcessed = Math.min(cursor + response.checked, verifyTargets.length);
+        setVerifyNextIndex(nextProcessed);
+        setVerifyProgress({
+          processed: nextProcessed,
+          total: verifyTargets.length,
+        });
         setVerifySummary((prev) => ({
           verified: prev.verified + response.verified,
           failed: prev.failed + response.failed,
         }));
       }
 
-      setVerifyBatchId(batchId);
+      if (verifyControlRef.current.cancelRequested) {
+        if (batchId) {
+          await cancelVerificationBatch.mutateAsync(batchId);
+        }
+        setVerifyPaused(false);
+      } else if (verifyControlRef.current.pauseRequested) {
+        if (batchId) {
+          await pauseVerificationBatch.mutateAsync(batchId);
+        }
+        setVerifyPaused(true);
+      } else {
+        setVerifyPaused(false);
+      }
+
       await refetchVerificationBatches();
     } catch (error: any) {
       console.error("Failed to verify WhatsApp numbers:", error);
@@ -864,6 +1027,49 @@ export default function Debtors() {
     } finally {
       setVerifyRunning(false);
     }
+  };
+
+  const handlePauseVerification = () => {
+    if (!verifyRunning) return;
+    verifyControlRef.current.pauseRequested = true;
+  };
+
+  const handleStopVerification = () => {
+    if (!verifyRunning) return;
+    verifyControlRef.current.cancelRequested = true;
+  };
+
+  const handleDeleteVerificationBatch = async (batchId: string, skipConfirm = false) => {
+    if (!skipConfirm) {
+      const confirmed = confirm("¿Eliminar este lote y sus resultados?");
+      if (!confirmed) return;
+    }
+    try {
+      await deleteVerificationBatch.mutateAsync(batchId);
+      if (verifyBatchId === batchId) {
+        clearVerificationState();
+      }
+      await refetchVerificationBatches();
+    } catch (error: any) {
+      alert(error?.message ?? "No se pudo eliminar el lote");
+    }
+  };
+
+  const handleResetVerificationDraft = async () => {
+    if (verifyRunning) {
+      alert("Primero detén o pausa la validación en curso");
+      return;
+    }
+    if (verifyBatchId) {
+      const removeServerBatch = confirm(
+        "¿También quieres eliminar el lote guardado en historial?"
+      );
+      if (removeServerBatch) {
+        await handleDeleteVerificationBatch(verifyBatchId, true);
+        return;
+      }
+    }
+    clearVerificationState();
   };
 
   const handleDownloadVerificationExport = async (batchIdOverride?: string | null) => {
@@ -1380,11 +1586,35 @@ export default function Debtors() {
                   >
                     {verifyRunning ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : verifyPaused || (verifyNextIndex > 0 && verifyNextIndex < verifyTargets.length) ? (
+                      <Play className="h-4 w-4" />
                     ) : (
                       <MessageSquare className="h-4 w-4" />
                     )}
-                    Verificar WhatsApp
+                    {verifyPaused || (verifyNextIndex > 0 && verifyNextIndex < verifyTargets.length)
+                      ? "Reanudar validación"
+                      : "Verificar WhatsApp"}
                   </Button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      variant="outline"
+                      className="gap-2"
+                      onClick={handlePauseVerification}
+                      disabled={!verifyRunning}
+                    >
+                      <Pause className="h-4 w-4" />
+                      Pausar
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="gap-2"
+                      onClick={handleStopVerification}
+                      disabled={!verifyRunning}
+                    >
+                      <Square className="h-4 w-4" />
+                      Detener
+                    </Button>
+                  </div>
                   <Button
                     variant="outline"
                     className="gap-2"
@@ -1394,6 +1624,15 @@ export default function Debtors() {
                     <Download className="h-4 w-4" />
                     Descargar Excel
                   </Button>
+                  <Button
+                    variant="ghost"
+                    className="gap-2"
+                    onClick={handleResetVerificationDraft}
+                    disabled={verifyRunning}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Limpiar/Eliminar
+                  </Button>
                 </div>
               </div>
 
@@ -1401,9 +1640,13 @@ export default function Debtors() {
                 <span>Números cargados: {verifyTargets.length}</span>
                 <span>Verificados: {verifySummary.verified}</span>
                 <span>Fallidos: {verifySummary.failed}</span>
+                <span>
+                  Estado: {verifyRunning ? "running" : verifyPaused ? "paused" : "idle"}
+                </span>
                 {verifyProgress.total > 0 && (
                   <span>
-                    Progreso: {verifyProgress.processed}/{verifyProgress.total}
+                    Progreso: {verifyProgress.processed}/{verifyProgress.total} (
+                    {Math.round((verifyProgress.processed / Math.max(verifyProgress.total, 1)) * 100)}%)
                   </span>
                 )}
               </div>
@@ -1442,7 +1685,8 @@ export default function Debtors() {
                   </Table>
                   {verifyPreview.length > 10 && (
                     <div className="px-4 py-2 text-xs text-muted-foreground">
-                      Mostrando 10 de {verifyPreview.length} (preview limitado a 200)
+                      Mostrando 10 de {verifyPreview.length} (solo muestra visual, no limita la
+                      validación total)
                     </div>
                   )}
                 </div>
@@ -1463,13 +1707,70 @@ export default function Debtors() {
                         <span>
                           Total: {batch.total} | OK: {batch.verified} | No: {batch.failed}
                         </span>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleDownloadVerificationExport(batch.id)}
-                        >
-                          Descargar
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDownloadVerificationExport(batch.id)}
+                          >
+                            Descargar
+                          </Button>
+                          {batch.status === "running" && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={async () => {
+                                try {
+                                  await pauseVerificationBatch.mutateAsync(batch.id);
+                                  await refetchVerificationBatches();
+                                } catch (error: any) {
+                                  alert(error?.message ?? "No se pudo pausar el lote");
+                                }
+                              }}
+                            >
+                              Pausar
+                            </Button>
+                          )}
+                          {batch.status === "paused" && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={async () => {
+                                try {
+                                  await resumeVerificationBatch.mutateAsync(batch.id);
+                                  await refetchVerificationBatches();
+                                } catch (error: any) {
+                                  alert(error?.message ?? "No se pudo reanudar el lote");
+                                }
+                              }}
+                            >
+                              Reanudar
+                            </Button>
+                          )}
+                          {(batch.status === "running" || batch.status === "paused") && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={async () => {
+                                try {
+                                  await cancelVerificationBatch.mutateAsync(batch.id);
+                                  await refetchVerificationBatches();
+                                } catch (error: any) {
+                                  alert(error?.message ?? "No se pudo cancelar el lote");
+                                }
+                              }}
+                            >
+                              Cancelar
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void handleDeleteVerificationBatch(batch.id)}
+                          >
+                            Eliminar
+                          </Button>
+                        </div>
                       </div>
                     ))}
                   </div>

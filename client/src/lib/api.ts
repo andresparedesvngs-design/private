@@ -157,7 +157,7 @@ export type WhatsAppVerificationBatch = {
   total: number;
   verified: number;
   failed: number;
-  status: "running" | "completed";
+  status: "running" | "paused" | "completed" | "cancelled";
   createdAt: string;
   updatedAt: string;
 };
@@ -739,6 +739,58 @@ export function useWhatsAppVerificationResults(
         `/whatsapp-verifications/${batchId}?limit=${limit}&skip=${skip}`
       ),
     enabled,
+  });
+}
+
+export function usePauseWhatsAppVerificationBatch() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (batchId: string) =>
+      fetchApi<WhatsAppVerificationBatch>(`/whatsapp-verifications/${batchId}/pause`, {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["whatsapp", "verifications"] });
+    },
+  });
+}
+
+export function useResumeWhatsAppVerificationBatch() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (batchId: string) =>
+      fetchApi<WhatsAppVerificationBatch>(`/whatsapp-verifications/${batchId}/resume`, {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["whatsapp", "verifications"] });
+    },
+  });
+}
+
+export function useCancelWhatsAppVerificationBatch() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (batchId: string) =>
+      fetchApi<WhatsAppVerificationBatch>(`/whatsapp-verifications/${batchId}/cancel`, {
+        method: "POST",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["whatsapp", "verifications"] });
+    },
+  });
+}
+
+export function useDeleteWhatsAppVerificationBatch() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (batchId: string) =>
+      fetchApi<void>(`/whatsapp-verifications/${batchId}`, {
+        method: "DELETE",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["whatsapp", "verifications"] });
+    },
   });
 }
 
