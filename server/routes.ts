@@ -1796,14 +1796,6 @@ export async function registerRoutes(
           maxAgeMs: 15 * 60 * 1000,
         })
       );
-      const runtimeActiveInPool = new Set(
-        poolConfiguredSessions.filter((id) => {
-          const runtime = whatsappManager.getSession(id);
-          if (!runtime) return false;
-          if (runtime.purpose === "notify") return false;
-          return runtime.status === "connected" || runtime.status === "limited";
-        })
-      );
       const connectedInMemory = new Set(
         whatsappManager.getConnectedSessionIdsWithOptions({
           includeNotify: false,
@@ -1814,18 +1806,13 @@ export async function registerRoutes(
       );
       if (poolSessionIds.length === 0) {
         poolSessionIds = poolConfiguredSessions.filter((id) =>
-          runtimeActiveInPool.has(id)
-        );
-      }
-      if (poolSessionIds.length === 0) {
-        poolSessionIds = poolConfiguredSessions.filter((id) =>
           connectedInMemory.has(id)
         );
       }
 
       if (poolSessionIds.length === 0) {
         return res.status(400).json({
-          error: "No active sessions available in this pool",
+          error: "No verified connected sessions available in this pool",
         });
       }
 
