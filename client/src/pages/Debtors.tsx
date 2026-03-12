@@ -972,7 +972,8 @@ export default function Debtors() {
       return;
     }
 
-    const chunkSize = 200;
+    // Smaller chunks reduce reverse-proxy timeout risk while keeping realtime progress.
+    const chunkSize = 50;
     let startIndex = Math.max(0, Math.min(verifyNextIndex, verifyTargets.length));
     let batchId: string | null = verifyBatchId ?? null;
     if (startIndex >= verifyTargets.length) {
